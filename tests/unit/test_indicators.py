@@ -120,15 +120,23 @@ class TestTechnicalIndicators:
 
     def test_candle_body_percent(self, sample_ohlcv: pd.DataFrame) -> None:
         """Test candle body percentage calculation."""
+        # Use proper OHLCV data where open/close are within high/low bounds
+        proper_ohlcv = pd.DataFrame({
+            "open": [100.0, 101.0, 99.0, 102.0],
+            "high": [105.0, 106.0, 104.0, 107.0],
+            "low": [98.0, 99.0, 97.0, 100.0],
+            "close": [103.0, 102.0, 101.0, 104.0],
+        })
+
         body_pct = TechnicalIndicators.candle_body_percent(
-            sample_ohlcv["open"],
-            sample_ohlcv["high"],
-            sample_ohlcv["low"],
-            sample_ohlcv["close"],
+            proper_ohlcv["open"],
+            proper_ohlcv["high"],
+            proper_ohlcv["low"],
+            proper_ohlcv["close"],
         )
 
-        assert len(body_pct) == len(sample_ohlcv)
-        # Body percentage should be between 0 and 100
+        assert len(body_pct) == len(proper_ohlcv)
+        # Body percentage should be between 0 and 100 for valid OHLCV
         valid_body = body_pct.dropna()
         assert (valid_body >= 0).all()
         assert (valid_body <= 100).all()

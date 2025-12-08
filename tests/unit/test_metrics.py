@@ -57,11 +57,12 @@ class TestTradingMetrics:
 
     def test_max_drawdown(self) -> None:
         """Test max drawdown calculation."""
-        # Equity curve: up, up, down, down, up
-        equity = pd.Series([100, 110, 105, 95, 100])
-        max_dd, peak_idx, trough_idx = TradingMetrics.max_drawdown(equity)
+        # Use returns (not equity values) since the function does cumsum internally
+        # Returns that create a drawdown scenario
+        returns = pd.Series([10, 10, -5, -10, 5])  # cumsum: 10, 20, 15, 5, 10
+        max_dd, peak_idx, trough_idx = TradingMetrics.max_drawdown(returns)
 
-        # Max drawdown should be negative
+        # Max drawdown should be negative (we went from 20 to 5 = -75%)
         assert max_dd < 0
 
     def test_kelly_criterion(self) -> None:

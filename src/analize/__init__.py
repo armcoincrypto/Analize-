@@ -8,6 +8,7 @@ ML-ready datasets, statistical reports, and parameter optimization suggestions.
 __version__ = "0.1.0"
 __author__ = "Analize Team"
 
+from analize.analyzer import CloudAIAnalyzer
 from analize.config import Settings, get_settings
 
-__all__ = ["Settings", "get_settings", "__version__"]
+__all__ = ["CloudAIAnalyzer", "Settings", "get_settings", "__version__"]

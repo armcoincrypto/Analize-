@@ -90,7 +90,8 @@ class TestOrderbookSnapshot:
             asks=[OrderbookLevel(price=100.1, quantity=10.0)],
         )
 
-        assert ob.spread == 0.1
+        # Use tolerance for floating point comparison
+        assert abs(ob.spread - 0.1) < 1e-10
         assert abs(ob.spread_bps - 10.0) < 0.1  # ~10 bps
 
     def test_imbalance_calculation(self) -> None:
