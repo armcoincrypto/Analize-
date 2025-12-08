@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analize-api
+  namespace: analize
+  labels:
+    app.kubernetes.io/name: analize
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: analize
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: analize
+        app.kubernetes.io/component: api
+    spec:
+      containers:
+        - name: api
+          image: analize:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: DB_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: analize-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: analize-secrets
+                  key: redis-url
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: analize-data-pvc
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analize-worker
+  namespace: analize
+  labels:
+    app.kubernetes.io/name: analize
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: analize
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: analize
+        app.kubernetes.io/component: worker
+    spec:
+      containers:
+        - name: worker
+          image: analize:latest
+          imagePullPolicy: Always
+          command: ["celery", "-A", "analize.jobs.celery_app", "worker", "--loglevel=info"]
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+            - name: DB_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: analize-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: analize-secrets
+                  key: redis-url
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: analize-data-pvc

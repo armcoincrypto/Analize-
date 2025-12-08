@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: analize-api
+  namespace: analize
+  labels:
+    app.kubernetes.io/name: analize
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: analize
+    app.kubernetes.io/component: api
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: analize-ingress
+  namespace: analize
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - analize.example.com
+      secretName: analize-tls
+  rules:
+    - host: analize.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: analize-api
+                port:
+                  number: 80
