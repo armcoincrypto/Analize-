@@ -91,11 +91,12 @@ class CloudAIAnalyzer:
         Returns:
             Dictionary with p-value, significance flag, and confidence interval
         """
-        result = self.significance_tester.test_win_rate_significance(
+        # Create tester with specified alpha if different from default
+        tester = SignificanceTester(alpha=alpha) if alpha != 0.05 else self.significance_tester
+        result = tester.test_win_rate_significance(
             wins=wins,
             total=total,
             null_hypothesis=null_hypothesis,
-            alpha=alpha,
         )
         return result.to_dict()
 
