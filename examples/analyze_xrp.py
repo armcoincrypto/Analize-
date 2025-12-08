@@ -21,7 +21,11 @@ def fetch_xrp_data(days: int = 30, interval: str = "1h") -> pd.DataFrame:
     Returns:
         DataFrame with OHLCV data
     """
-    url = "https://api.binance.com/api/v3/klines"
+    # Try Binance first, then Binance US, then a backup
+    urls = [
+        "https://api.binance.com/api/v3/klines",
+        "https://api.binance.us/api/v3/klines",
+    ]
 
     end_time = int(datetime.now().timestamp() * 1000)
     start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
@@ -34,8 +38,40 @@ def fetch_xrp_data(days: int = 30, interval: str = "1h") -> pd.DataFrame:
         "limit": 1000
     }
 
-    response = requests.get(url, params=params)
-    data = response.json()
+    data = None
+    for url in urls:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list) and len(data) > 0:
+                    print(f"  Using: {url}")
+                    break
+                else:
+                    print(f"  {url}: Empty response")
+            else:
+                print(f"  {url}: HTTP {response.status_code}")
+        except Exception as e:
+            print(f"  {url}: {e}")
+
+    if not data or len(data) == 0:
+        print("\nCould not fetch data from Binance. Using sample data instead.")
+        # Generate sample data for demonstration
+        import numpy as np
+        np.random.seed(42)
+        n = 720  # 30 days * 24 hours
+        dates = pd.date_range(end=datetime.now(), periods=n, freq="h")
+        price = 2.0 + np.cumsum(np.random.randn(n) * 0.02)
+        price = np.maximum(price, 0.5)  # Ensure positive
+
+        return pd.DataFrame({
+            "timestamp": dates,
+            "open": price - np.random.rand(n) * 0.01,
+            "high": price + np.random.rand(n) * 0.02,
+            "low": price - np.random.rand(n) * 0.02,
+            "close": price,
+            "volume": np.random.rand(n) * 1000000 + 100000,
+        })
 
     df = pd.DataFrame(data, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
