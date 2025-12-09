@@ -2,18 +2,20 @@
 Multi-Exchange Data Fetcher
 
 Supports multiple exchanges:
-- Binance (default)
+- Bybit (primary)
 - MEXC
-- Bybit
+- Binance
 - KuCoin
 
 All exchanges have similar REST APIs for public market data.
+Includes retry logic with exponential backoff.
 """
 
 import requests
 import pandas as pd
+import time
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -68,10 +70,42 @@ EXCHANGE_CONFIGS = {
 }
 
 
-class ExchangeClient:
-    """Multi-exchange data fetcher."""
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAYS = [2, 4, 8]  # Exponential backoff: 2s, 4s, 8s
 
-    def __init__(self, exchange: Exchange = Exchange.MEXC, timeout: int = 15):
+
+def retry_request(url: str, params: dict, timeout: int = 15) -> Optional[requests.Response]:
+    """Make HTTP request with retry logic and exponential backoff."""
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(url, params=params, timeout=timeout)
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 429:  # Rate limited
+                wait_time = RETRY_DELAYS[attempt] if attempt < len(RETRY_DELAYS) else 16
+                time.sleep(wait_time)
+                continue
+            else:
+                return response  # Return non-retryable errors
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                wait_time = RETRY_DELAYS[attempt]
+                time.sleep(wait_time)
+        except Exception as e:
+            last_error = e
+            break
+
+    return None
+
+
+class ExchangeClient:
+    """Multi-exchange data fetcher with retry logic."""
+
+    def __init__(self, exchange: Exchange = Exchange.BYBIT, timeout: int = 15):
         self.exchange = exchange
         self.config = EXCHANGE_CONFIGS[exchange]
         self.timeout = timeout
@@ -116,7 +150,7 @@ class ExchangeClient:
             return pd.DataFrame()
 
     def _fetch_binance(self, symbol: str, interval: str, days: int) -> pd.DataFrame:
-        """Fetch from Binance."""
+        """Fetch from Binance with retry."""
         url = f"{self.config.base_url}{self.config.klines_endpoint}"
         params = {
             "symbol": symbol,
@@ -125,17 +159,14 @@ class ExchangeClient:
             "limit": 1000
         }
 
-        try:
-            response = requests.get(url, params=params, timeout=self.timeout)
-            if response.status_code == 200:
-                return self._parse_binance_response(response.json())
-        except Exception as e:
-            print(f"  Binance error: {e}")
+        response = retry_request(url, params, self.timeout)
+        if response and response.status_code == 200:
+            return self._parse_binance_response(response.json())
 
         return pd.DataFrame()
 
     def _fetch_mexc(self, symbol: str, interval: str, days: int) -> pd.DataFrame:
-        """Fetch from MEXC."""
+        """Fetch from MEXC with retry."""
         url = f"{self.config.base_url}{self.config.klines_endpoint}"
         params = {
             "symbol": symbol,
@@ -144,19 +175,15 @@ class ExchangeClient:
             "limit": 1000
         }
 
-        try:
-            response = requests.get(url, params=params, timeout=self.timeout)
-            if response.status_code == 200:
-                data = response.json()
-                # MEXC returns same format as Binance
-                return self._parse_binance_response(data)
-        except Exception as e:
-            print(f"  MEXC error: {e}")
+        response = retry_request(url, params, self.timeout)
+        if response and response.status_code == 200:
+            data = response.json()
+            return self._parse_binance_response(data)
 
         return pd.DataFrame()
 
     def _fetch_bybit(self, symbol: str, interval: str, days: int) -> pd.DataFrame:
-        """Fetch from Bybit."""
+        """Fetch from Bybit with retry."""
         url = f"{self.config.base_url}{self.config.klines_endpoint}"
         params = {
             "category": "spot",
@@ -166,19 +193,16 @@ class ExchangeClient:
             "limit": 1000
         }
 
-        try:
-            response = requests.get(url, params=params, timeout=self.timeout)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("retCode") == 0:
-                    return self._parse_bybit_response(data["result"]["list"])
-        except Exception as e:
-            print(f"  Bybit error: {e}")
+        response = retry_request(url, params, self.timeout)
+        if response and response.status_code == 200:
+            data = response.json()
+            if data.get("retCode") == 0:
+                return self._parse_bybit_response(data["result"]["list"])
 
         return pd.DataFrame()
 
     def _fetch_kucoin(self, symbol: str, interval: str, days: int) -> pd.DataFrame:
-        """Fetch from KuCoin."""
+        """Fetch from KuCoin with retry."""
         # KuCoin uses different symbol format
         symbol = symbol.replace("USDT", "-USDT")
         url = f"{self.config.base_url}{self.config.klines_endpoint}"
@@ -193,14 +217,11 @@ class ExchangeClient:
             "endAt": end_time
         }
 
-        try:
-            response = requests.get(url, params=params, timeout=self.timeout)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("code") == "200000":
-                    return self._parse_kucoin_response(data["data"])
-        except Exception as e:
-            print(f"  KuCoin error: {e}")
+        response = retry_request(url, params, self.timeout)
+        if response and response.status_code == 200:
+            data = response.json()
+            if data.get("code") == "200000":
+                return self._parse_kucoin_response(data["data"])
 
         return pd.DataFrame()
 
@@ -231,25 +252,35 @@ class ExchangeClient:
         df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
-        return df[["timestamp", "open", "high", "low", "close", "volume"]].sort_values("timestamp")
+        # Bybit returns newest first, so sort ascending
+        return df[["timestamp", "open", "high", "low", "close", "volume"]].sort_values("timestamp").reset_index(drop=True)
 
     def _parse_kucoin_response(self, data: List) -> pd.DataFrame:
         """Parse KuCoin response format."""
         if not data:
             return pd.DataFrame()
 
-        # KuCoin returns: [time, open, close, high, low, volume, amount]
-        df = pd.DataFrame(data, columns=[
-            "timestamp", "open", "close", "high", "low", "volume", "amount"
-        ])
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="s")
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        return df[["timestamp", "open", "high", "low", "close", "volume"]].sort_values("timestamp")
+        # KuCoin API returns: [time, open, close, high, low, volume, turnover]
+        # Note: KuCoin order is OCLHV not OHLCV!
+        rows = []
+        for candle in data:
+            rows.append({
+                "timestamp": int(candle[0]),
+                "open": float(candle[1]),
+                "high": float(candle[3]),      # Index 3 is high
+                "low": float(candle[4]),       # Index 4 is low
+                "close": float(candle[2]),     # Index 2 is close
+                "volume": float(candle[5]),
+            })
+
+        df = pd.DataFrame(rows)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+        # KuCoin returns newest first, so sort ascending
+        return df[["timestamp", "open", "high", "low", "close", "volume"]].sort_values("timestamp").reset_index(drop=True)
 
 
 class MultiExchangeClient:
-    """Try multiple exchanges with fallback."""
+    """Try multiple exchanges with fallback and retry."""
 
     def __init__(self, preferred_exchange: Exchange = Exchange.BYBIT):
         self.preferred = preferred_exchange
@@ -264,7 +295,7 @@ class MultiExchangeClient:
             self.fallback_order.remove(preferred_exchange)
             self.fallback_order.insert(0, preferred_exchange)
 
-    def get_klines(self, symbol: str, interval: str = "1d", days: int = 250) -> tuple:
+    def get_klines(self, symbol: str, interval: str = "1d", days: int = 250) -> Tuple[pd.DataFrame, str]:
         """
         Fetch data from preferred exchange with fallback.
 
@@ -272,11 +303,14 @@ class MultiExchangeClient:
             (DataFrame, exchange_name) tuple
         """
         for exchange in self.fallback_order:
-            client = ExchangeClient(exchange)
-            df = client.get_klines(symbol, interval, days)
+            try:
+                client = ExchangeClient(exchange)
+                df = client.get_klines(symbol, interval, days)
 
-            if not df.empty and len(df) > 50:
-                return df, EXCHANGE_CONFIGS[exchange].name
+                if not df.empty and len(df) > 50:
+                    return df, EXCHANGE_CONFIGS[exchange].name
+            except Exception as e:
+                continue  # Try next exchange
 
         return pd.DataFrame(), "None"
 
@@ -284,7 +318,7 @@ class MultiExchangeClient:
 # Convenience function
 def fetch_data(
     symbol: str,
-    exchange: str = "mexc",
+    exchange: str = "bybit",
     interval: str = "1d",
     days: int = 250
 ) -> pd.DataFrame:
@@ -293,7 +327,7 @@ def fetch_data(
 
     Args:
         symbol: Trading pair (e.g., "XRP", "XRPUSDT")
-        exchange: Exchange name ("mexc", "binance", "bybit", "kucoin")
+        exchange: Exchange name ("bybit", "mexc", "binance", "kucoin")
         interval: Candle interval ("1d", "1h", "4h", "15m")
         days: Number of days of history
 
@@ -307,7 +341,7 @@ def fetch_data(
         "kucoin": Exchange.KUCOIN,
     }
 
-    exchange_enum = exchange_map.get(exchange.lower(), Exchange.MEXC)
+    exchange_enum = exchange_map.get(exchange.lower(), Exchange.BYBIT)
     client = ExchangeClient(exchange_enum)
     return client.get_klines(symbol, interval, days)
 

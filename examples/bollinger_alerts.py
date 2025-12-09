@@ -215,17 +215,20 @@ class ProtectionFilters:
             return True, 999
 
         lookback_start = max(0, idx - lookback)
-        high_in_lookback = df["close"].iloc[lookback_start:idx].max()
+        lookback_slice = df["close"].iloc[lookback_start:idx]
+        high_in_lookback = lookback_slice.max()
         current_price = df["close"].iloc[idx]
 
         drop_pct = ((current_price - high_in_lookback) / high_in_lookback) * 100
 
         if drop_pct <= threshold:
-            high_idx = df["close"].iloc[lookback_start:idx].idxmax()
-            days_since = idx - high_idx
+            # Use argmax() for position-based index (not DataFrame index)
+            high_pos_in_slice = lookback_slice.values.argmax()
+            # Days since high = distance from high position to current position
+            days_since = (idx - lookback_start - 1) - high_pos_in_slice
 
             if days_since < cooldown:
-                return False, days_since
+                return False, max(0, days_since)
 
         return True, 999
 

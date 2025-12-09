@@ -74,7 +74,7 @@
     },
     "telegram": {
       "enabled": true,
-      "bot_token": "8519660675:AAGNmq2vbwf4QsWZspQSy1kbWIe2Nwebnk0",
+      "bot_token": "8519660675:AAHltkVn2NB5PAo5mi8UeFfyJxWRFLeyjdc",
       "chat_id": "GET_YOUR_CHAT_ID",
       "instructions": "Run: python examples/telegram_setup.py to get your chat_id"
     }

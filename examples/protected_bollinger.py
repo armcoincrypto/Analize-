@@ -191,12 +191,15 @@ class ProtectionFilters:
 
         if drop_pct <= CRASH_THRESHOLD:
             # There was a crash - count days since crash peak
-            high_idx = df["close"].iloc[lookback_start:idx].idxmax()
-            days_since = idx - high_idx
+            # Use argmax() for position-based index (not DataFrame index)
+            lookback_slice = df["close"].iloc[lookback_start:idx]
+            high_pos_in_slice = lookback_slice.values.argmax()
+            # Days since high = distance from high position to current
+            days_since = (idx - lookback_start - 1) - high_pos_in_slice
 
             # Need to wait FIRST_TOUCH_COOLDOWN days after crash
             if days_since < FIRST_TOUCH_COOLDOWN:
-                return False, days_since
+                return False, max(0, days_since)
 
         return True, 999
 
