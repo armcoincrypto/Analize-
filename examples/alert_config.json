@@ -27,6 +27,38 @@
     "fee_percent": 0.2,
     "near_buy_threshold_percent": 3.0
   },
+  "protections": {
+    "enabled": true,
+    "require_all": true,
+    "trend_filter": {
+      "enabled": true,
+      "ma_period": 200,
+      "description": "Price must be above 200-day MA to buy"
+    },
+    "volume_filter": {
+      "enabled": true,
+      "ma_period": 20,
+      "min_ratio": 0.8,
+      "description": "Volume must be >= 80% of 20-day average"
+    },
+    "first_touch_rejection": {
+      "enabled": true,
+      "crash_lookback_days": 10,
+      "crash_threshold_percent": -15,
+      "cooldown_days": 5,
+      "description": "Skip first touch after >15% crash in 10 days"
+    },
+    "penetration_filter": {
+      "enabled": true,
+      "min_penetration_percent": 1.0,
+      "description": "Price must go 1%+ below lower band"
+    },
+    "time_exit": {
+      "enabled": true,
+      "max_hold_days": 22,
+      "description": "Exit if no bounce after 22 days"
+    }
+  },
   "notifications": {
     "console": true,
     "file_log": true,
@@ -42,10 +74,19 @@
     }
   },
   "strategy": {
-    "name": "Bollinger Mean Reversion",
-    "description": "Buy when price touches lower Bollinger Band, sell at middle band",
-    "entry": "Price <= Lower Band",
-    "exit": "Price >= Middle Band",
+    "name": "Protected Bollinger Mean Reversion",
+    "description": "Buy when price touches lower Bollinger Band WITH all protections passed, sell at middle band or time exit",
+    "entry_rules": [
+      "Price <= Lower Bollinger Band",
+      "Price > 200-day MA (trend filter)",
+      "Volume >= 80% of average (volume filter)",
+      "Not first touch after crash (cooldown)",
+      "Price 1%+ below band (penetration)"
+    ],
+    "exit_rules": [
+      "Price >= Middle Band (target)",
+      "Position held > 22 days (time exit)"
+    ],
     "timeframe": "Daily",
     "expected_hold_days": "4-6 days per trade"
   }
