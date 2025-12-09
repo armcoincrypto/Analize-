@@ -1,0 +1,52 @@
+{
+  "coins": {
+    "XRPUSDT": {
+      "name": "XRP",
+      "enabled": true,
+      "period": 20,
+      "std_dev": 1.5,
+      "notes": "Best performer: +133% backtest, 100% win rate"
+    },
+    "SOLUSDT": {
+      "name": "SOL",
+      "enabled": true,
+      "period": 20,
+      "std_dev": 1.5,
+      "notes": "Strong performer: +78% backtest, 86% win rate"
+    },
+    "ATOMUSDT": {
+      "name": "ATOM",
+      "enabled": true,
+      "period": 20,
+      "std_dev": 1.5,
+      "notes": "Solid performer: +65% backtest, 83% win rate"
+    }
+  },
+  "settings": {
+    "check_interval_seconds": 3600,
+    "fee_percent": 0.2,
+    "near_buy_threshold_percent": 3.0
+  },
+  "notifications": {
+    "console": true,
+    "file_log": true,
+    "webhook": {
+      "enabled": false,
+      "url": "",
+      "type": "generic"
+    },
+    "telegram": {
+      "enabled": false,
+      "bot_token": "",
+      "chat_id": ""
+    }
+  },
+  "strategy": {
+    "name": "Bollinger Mean Reversion",
+    "description": "Buy when price touches lower Bollinger Band, sell at middle band",
+    "entry": "Price <= Lower Band",
+    "exit": "Price >= Middle Band",
+    "timeframe": "Daily",
+    "expected_hold_days": "4-6 days per trade"
+  }
+}
