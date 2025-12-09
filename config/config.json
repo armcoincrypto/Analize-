@@ -7,9 +7,9 @@
   },
   "exchange": {
     "name": "bybit",
-    "testnet": true,
-    "api_key": "YOUR_API_KEY",
-    "api_secret": "YOUR_API_SECRET"
+    "testnet": false,
+    "api_key": "PASTE_BYBIT_API_KEY_HERE",
+    "api_secret": "PASTE_BYBIT_API_SECRET_HERE"
   },
   "coins": {
     "XRPUSDT": {"enabled": true, "period": 20, "std_dev": 1.5},
@@ -35,7 +35,7 @@
     "telegram": {
       "enabled": true,
       "bot_token": "8519660675:AAHltkVn2NB5PAo5mi8UeFfyJxWRFLeyjdc",
-      "chat_id": "YOUR_CHAT_ID"
+      "chat_id": "PASTE_YOUR_TELEGRAM_CHAT_ID_HERE"
     }
   }
 }
