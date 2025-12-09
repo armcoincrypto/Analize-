@@ -1,4 +1,9 @@
 {
+  "exchange": {
+    "primary": "bybit",
+    "fallback": ["mexc", "binance", "kucoin"],
+    "available": ["bybit", "mexc", "binance", "kucoin"]
+  },
   "coins": {
     "XRPUSDT": {
       "name": "XRP",
@@ -68,9 +73,10 @@
       "type": "generic"
     },
     "telegram": {
-      "enabled": false,
-      "bot_token": "",
-      "chat_id": ""
+      "enabled": true,
+      "bot_token": "8519660675:AAGNmq2vbwf4QsWZspQSy1kbWIe2Nwebnk0",
+      "chat_id": "GET_YOUR_CHAT_ID",
+      "instructions": "Run: python examples/telegram_setup.py to get your chat_id"
     }
   },
   "strategy": {

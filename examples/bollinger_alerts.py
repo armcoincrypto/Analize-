@@ -20,8 +20,13 @@ from pathlib import Path
 import json
 import time
 import os
+import sys
 from typing import Optional, List, Dict
+
+# Add parent to path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from analize.features.indicators import TechnicalIndicators
+from analize.exchanges import MultiExchangeClient, Exchange
 
 
 # ============================================================================
@@ -149,43 +154,19 @@ class Alert:
 
 
 # ============================================================================
-# DATA FETCHING
+# DATA FETCHING (BYBIT PRIMARY)
 # ============================================================================
 
+# Initialize exchange client (Bybit primary with fallbacks)
+EXCHANGE_CLIENT = MultiExchangeClient(preferred_exchange=Exchange.BYBIT)
+
+
 def fetch_daily_data(symbol: str, days: int = 250) -> pd.DataFrame:
-    """Fetch daily candles from Binance (need 250 days for 200 MA)."""
-    urls = [
-        "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
-    ]
-
-    params = {
-        "symbol": symbol,
-        "interval": "1d",
-        "startTime": int((datetime.now() - timedelta(days=days)).timestamp() * 1000),
-        "endTime": int(datetime.now().timestamp() * 1000),
-        "limit": 1000
-    }
-
-    for url in urls:
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, list) and len(data) > 0:
-                    df = pd.DataFrame(data, columns=[
-                        "timestamp", "open", "high", "low", "close", "volume",
-                        "close_time", "quote_volume", "trades", "taker_buy_base",
-                        "taker_buy_quote", "ignore"
-                    ])
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                    for col in ["open", "high", "low", "close", "volume"]:
-                        df[col] = df[col].astype(float)
-                    return df[["timestamp", "open", "high", "low", "close", "volume"]]
-        except Exception:
-            continue
-
-    return pd.DataFrame()
+    """Fetch daily candles from Bybit (with fallback to other exchanges)."""
+    df, exchange_name = EXCHANGE_CLIENT.get_klines(symbol, "1d", days)
+    if not df.empty:
+        print(f"    [{exchange_name}]", end="")
+    return df
 
 
 # ============================================================================
@@ -586,7 +567,8 @@ def run_monitor(continuous: bool = False, interval_seconds: int = CHECK_INTERVAL
     print("PROTECTED BOLLINGER ALERT SYSTEM")
     print("=" * 95)
 
-    print(f"\nMonitoring {len(COIN_CONFIG)} coins with 5 protection filters:")
+    print(f"\nExchange: BYBIT (with fallback to MEXC, Binance, KuCoin)")
+    print(f"Monitoring {len(COIN_CONFIG)} coins with 5 protection filters:")
     for symbol, config in COIN_CONFIG.items():
         print(f"  - {config['name']}: Bollinger({config['period']}, {config['std_dev']})")
 
