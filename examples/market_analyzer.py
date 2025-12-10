@@ -198,10 +198,14 @@ class PriceDataFetcher:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        # Try Bybit first
-        df = self._fetch_bybit(symbol, days)
+        # Try multiple sources
+        df = self._fetch_binance(symbol, days)
         if df.empty:
-            df = self._fetch_binance(symbol, days)
+            df = self._fetch_binance_us(symbol, days)
+        if df.empty:
+            df = self._fetch_coingecko(symbol, days)
+        if df.empty:
+            df = self._fetch_bybit(symbol, days)
 
         if not df.empty:
             self.cache[cache_key] = df
@@ -274,6 +278,70 @@ class PriceDataFetcher:
                 return df[["timestamp", "open", "high", "low", "close", "volume"]]
         except Exception as e:
             print(f"Binance fetch error: {e}")
+
+        return pd.DataFrame()
+
+    def _fetch_binance_us(self, symbol: str, days: int) -> pd.DataFrame:
+        """Fetch from Binance US."""
+        try:
+            params = {
+                "symbol": symbol,
+                "interval": "1d",
+                "startTime": int((datetime.now() - timedelta(days=days)).timestamp() * 1000),
+                "endTime": int(datetime.now().timestamp() * 1000),
+                "limit": 1000,
+            }
+
+            response = requests.get("https://api.binance.us/api/v3/klines", params=params, timeout=15)
+            data = response.json()
+
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data, columns=[
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_volume", "trades", "taker_buy_base",
+                    "taker_buy_quote", "ignore"
+                ])
+
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                for col in ["open", "high", "low", "close", "volume"]:
+                    df[col] = df[col].astype(float)
+
+                return df[["timestamp", "open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            print(f"Binance US fetch error: {e}")
+
+        return pd.DataFrame()
+
+    def _fetch_coingecko(self, symbol: str, days: int) -> pd.DataFrame:
+        """Fetch from CoinGecko (free, no API key needed)."""
+        # Map symbol to CoinGecko ID
+        coingecko_ids = {
+            "XRPUSDT": "ripple",
+            "SOLUSDT": "solana",
+            "ATOMUSDT": "cosmos",
+            "BTCUSDT": "bitcoin",
+            "ETHUSDT": "ethereum",
+        }
+
+        coin_id = coingecko_ids.get(symbol)
+        if not coin_id:
+            return pd.DataFrame()
+
+        try:
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+            params = {"vs_currency": "usd", "days": min(days, 365)}
+
+            response = requests.get(url, params=params, timeout=15)
+            data = response.json()
+
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df["volume"] = 0.0  # CoinGecko OHLC doesn't include volume
+
+                return df[["timestamp", "open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            print(f"CoinGecko fetch error: {e}")
 
         return pd.DataFrame()
 
