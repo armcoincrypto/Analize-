@@ -620,8 +620,8 @@ class MasterAnalyzer:
                 stats = stats_calc.calculate_stats(symbol)
                 if stats:
                     asset_stats[symbol] = {
-                        "annual_return": stats.annual_return,
-                        "annual_volatility": stats.annual_volatility,
+                        "expected_return": stats.expected_return,
+                        "volatility": stats.volatility,
                         "sharpe_ratio": stats.sharpe_ratio,
                         "max_drawdown": stats.max_drawdown
                     }
