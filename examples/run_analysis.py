@@ -47,7 +47,7 @@ except ImportError as e:
     print(f"[WARN] correlation_analyzer not available: {e}")
 
 try:
-    from examples.whale_tracker import WhaleTracker
+    from examples.whale_tracker import WhaleTracker, WhaleAlertAggregator
     HAS_WHALE = True
 except ImportError as e:
     print(f"[WARN] whale_tracker not available: {e}")
@@ -225,23 +225,24 @@ class MasterAnalyzer:
         print("=" * 60)
 
         try:
-            tracker = WhaleTracker()
+            aggregator = WhaleAlertAggregator()
 
             for symbol in self.symbols:
-                result = tracker.analyze_symbol(symbol)
+                # Use exchange flow analysis
+                flow = aggregator._analyze_exchange_flows(symbol)
 
-                if result:
-                    # Get signal from result
-                    signal_str = result.get("signal", "NEUTRAL")
-                    net_flow = result.get("net_flow_usd", 0)
+                if flow:
+                    net_flow = flow.net_flow_24h
 
-                    # Map signal to direction
-                    if "BUY" in signal_str.upper():
+                    # Determine signal based on net flow
+                    # Outflow (negative) = bullish (coins leaving exchanges)
+                    # Inflow (positive) = bearish (coins entering exchanges)
+                    if net_flow < -1000000:  # Large outflow
                         direction = "BUY"
-                        confidence = 0.7
-                    elif "SELL" in signal_str.upper():
+                        confidence = min(abs(net_flow) / 50000000, 0.85)
+                    elif net_flow > 1000000:  # Large inflow
                         direction = "SELL"
-                        confidence = 0.7
+                        confidence = min(abs(net_flow) / 50000000, 0.85)
                     else:
                         direction = "NEUTRAL"
                         confidence = 0.5
@@ -257,15 +258,16 @@ class MasterAnalyzer:
                     )
                     self.db.insert_whale_activity(activity)
 
+                    flow_dir = "OUTFLOW" if net_flow < 0 else "INFLOW"
                     self.results["whale"][symbol] = {
                         "net_flow": net_flow,
                         "direction": direction,
                         "confidence": confidence,
-                        "signal": signal_str
+                        "signal": flow_dir
                     }
-                    print(f"  {symbol}: {signal_str} -> {direction}")
+                    print(f"  {symbol}: ${abs(net_flow):,.0f} {flow_dir} -> {direction}")
                 else:
-                    print(f"  {symbol}: No whale data available")
+                    print(f"  {symbol}: No exchange flow data")
         except Exception as e:
             print(f"  [ERROR] Whale analysis failed: {e}")
             import traceback
@@ -289,8 +291,8 @@ class MasterAnalyzer:
             for symbol in self.symbols:
                 result = analyzer.analyze_symbol(symbol)
 
-                if result and result.get("current_rate") is not None:
-                    rate = result["current_rate"]
+                if result and result.current_rate is not None:
+                    rate = result.current_rate
 
                     # Negative funding = shorts paying = bullish
                     # Positive funding = longs paying = bearish
@@ -318,7 +320,7 @@ class MasterAnalyzer:
                         signal_direction=direction,
                         confidence=confidence,
                         timeframe="8h",
-                        parameters=json.dumps({"signal": result.get("signal", "NEUTRAL")})
+                        parameters=json.dumps({"signal": result.signal})
                     )
                     self.db.insert_technical_signal(signal)
 
@@ -364,28 +366,31 @@ class MasterAnalyzer:
                 signal = signal_gen.generate_signal(orderbook)
 
                 if signal:
-                    direction = signal.direction
+                    # OrderFlowSignal has .signal (STRONG_BUY, BUY, etc.), .confidence, .reasons
+                    direction = signal.signal  # This is the direction
                     confidence = signal.confidence
+                    reasons = signal.reasons
 
                     tech_signal = TechnicalSignal(
                         symbol=f"{symbol}USDT",
                         timestamp=self.timestamp,
                         signal_name="orderflow",
-                        signal_value=imbalance.ratio if imbalance else 0,
+                        signal_value=imbalance.imbalance_ratio if imbalance else 0,
                         signal_direction=direction,
                         confidence=confidence,
                         timeframe="1h",
-                        parameters=json.dumps({"reason": signal.reason})
+                        parameters=json.dumps({"reasons": reasons[:2] if reasons else []})
                     )
                     self.db.insert_technical_signal(tech_signal)
 
+                    reason_str = reasons[0] if reasons else "No specific reason"
                     self.results["orderflow"][symbol] = {
-                        "imbalance": imbalance.ratio if imbalance else 0,
+                        "imbalance": imbalance.imbalance_ratio if imbalance else 0,
                         "direction": direction,
                         "confidence": confidence,
-                        "signal": signal.signal_type
+                        "signal": direction
                     }
-                    print(f"  {symbol}: {signal.signal_type} -> {direction} ({signal.reason})")
+                    print(f"  {symbol}: {direction} (conf: {confidence:.2f}) - {reason_str}")
                 else:
                     print(f"  {symbol}: No signal generated")
         except Exception as e:
@@ -412,9 +417,12 @@ class MasterAnalyzer:
                 result = generator.generate_signal(symbol)
 
                 if result:
-                    direction = result.direction
+                    # MLSignal has: .prediction (BUY/SELL/HOLD), .confidence,
+                    # .probability_up, .probability_down, .model_name
+                    direction = result.prediction
                     confidence = result.confidence
-                    predicted_return = result.predicted_return
+                    # Calculate expected return from probabilities
+                    predicted_return = (result.probability_up - result.probability_down) * 10
 
                     pred = MLPrediction(
                         symbol=f"{symbol}USDT",
@@ -424,7 +432,7 @@ class MasterAnalyzer:
                         predicted_return=predicted_return,
                         confidence=confidence,
                         feature_importance=json.dumps(
-                            {"top_features": result.feature_importance[:3]} if result.feature_importance else {}
+                            {"features_used": result.features_used}
                         ),
                         model_version="1.0",
                         validation_score=None
@@ -438,7 +446,7 @@ class MasterAnalyzer:
                         "model": result.model_name
                     }
                     print(f"  {symbol}: {direction} (conf: {confidence:.2f}, "
-                          f"return: {predicted_return:+.2f}%)")
+                          f"prob_up: {result.probability_up:.1%})")
                 else:
                     print(f"  {symbol}: Unable to generate ML signal")
         except Exception as e:
