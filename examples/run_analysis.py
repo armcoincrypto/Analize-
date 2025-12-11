@@ -636,10 +636,10 @@ class MasterAnalyzer:
                         std_dev = close.rolling(window=bb_period).std()
                         lower = middle - (std_dev * bb_std)
 
-                        current_price = close.iloc[-1]
-                        bb_lower = lower.iloc[-1]
-                        bb_touch = current_price <= bb_lower
-                        bb_penetration = ((bb_lower - current_price) / bb_lower * 100) if bb_lower > 0 and current_price < bb_lower else 0
+                        current_price = float(close.iloc[-1])
+                        bb_lower = float(lower.iloc[-1])
+                        bb_touch = bool(current_price <= bb_lower)
+                        bb_penetration = float(((bb_lower - current_price) / bb_lower * 100) if bb_lower > 0 and current_price < bb_lower else 0)
 
                         # Calculate Volume spike (if we had volume data)
                         volume_spike = False
@@ -653,8 +653,8 @@ class MasterAnalyzer:
                             above_200ma = True  # Default if insufficient data
 
                         # Determine signals
-                        rsi_oversold = rsi_value < 35
-                        rsi_overbought = rsi_value > 70
+                        rsi_oversold = bool(rsi_value < 35)
+                        rsi_overbought = bool(rsi_value > 70)
 
                         # Calculate score
                         score = 0
