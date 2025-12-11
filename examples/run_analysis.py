@@ -2,7 +2,7 @@
 """
 Master Analysis Runner - Connects All Tools to Quant Database
 
-Runs all 19 analysis tools and stores results in the self-learning database.
+Runs all 23 analysis tools and stores results in the self-learning database.
 This creates a unified view of all signals with weighted consensus.
 
 Tools Integrated:
@@ -24,7 +24,11 @@ Tools Integrated:
 16. MFE/MAE Analysis - Maximum Favorable/Adverse Excursion
 17. Stats Breakdown - By symbol, time, volatility regime
 18. Data Quality Audit - Provenance tracking, null detection
-19. Signal Aggregator - Weighted consensus
+19. Paper Trader - Real-time paper trading simulation
+20. Bollinger Alerts - Protected alerts with 5 filters
+21. Trading Simulator - Realistic backtesting with slippage
+22. Notification Sender - Telegram/Slack/Email notifications
+23. Signal Aggregator - Weighted consensus
 
 Usage:
     python examples/run_analysis.py
@@ -230,6 +234,34 @@ try:
 except ImportError as e:
     print(f"[WARN] trading simulator not available: {e}")
 
+# Paper Trader (Real-time Paper Trading)
+HAS_PAPER_TRADER = False
+try:
+    from examples.paper_trader import PaperTrader, Position, Trade as PaperTrade
+    HAS_PAPER_TRADER = True
+except ImportError as e:
+    print(f"[WARN] paper trader not available: {e}")
+
+# Bollinger Alerts (Protected Alert System)
+HAS_BOLLINGER_ALERTS = False
+try:
+    from examples.bollinger_alerts import (
+        COIN_CONFIG as BB_COIN_CONFIG,
+        ProtectionFilters, ProtectionStatus,
+        analyze_coin as bb_analyze_coin
+    )
+    HAS_BOLLINGER_ALERTS = True
+except ImportError as e:
+    print(f"[WARN] bollinger alerts not available: {e}")
+
+# Notification Sender (Telegram/Slack/Email)
+HAS_NOTIFICATIONS = False
+try:
+    from src.analize.notifications.sender import NotificationSender
+    HAS_NOTIFICATIONS = True
+except ImportError as e:
+    print(f"[WARN] notification sender not available: {e}")
+
 
 class MasterAnalyzer:
     """
@@ -276,7 +308,10 @@ class MasterAnalyzer:
             "mfe_mae": {},       # MFE/MAE outcome analysis
             "stats_breakdown": {},  # Comprehensive stats breakdown
             "provenance": {},    # Data quality & audit trail
+            "paper_trader": {},  # Paper trading status
+            "bollinger_alerts": {},  # Protected Bollinger alerts
             "simulator": {},     # Backtesting simulation
+            "notifications": {}, # Notification channel status
             "aggregated": {}
         }
 
@@ -2053,6 +2088,318 @@ class MasterAnalyzer:
 
         return self.results["provenance"]
 
+    def run_paper_trader_status(self) -> Dict[str, Any]:
+        """Check paper trading status and recent trades."""
+        if not HAS_PAPER_TRADER:
+            print("\n[SKIP] Paper trader - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("PAPER TRADING STATUS")
+        print("(Real-time trading simulation)")
+        print("=" * 60)
+
+        try:
+            # Check for existing trade log
+            from pathlib import Path
+            import json
+
+            trades_log = Path(__file__).parent.parent / "data" / "paper_trades.json"
+
+            if trades_log.exists():
+                with open(trades_log, "r") as f:
+                    data = json.load(f)
+
+                symbol = data.get("symbol", "UNKNOWN")
+                strategy = data.get("strategy", "UNKNOWN")
+                initial = data.get("initial_capital", 0)
+                current = data.get("current_capital", 0)
+                stats = data.get("statistics", {})
+                trades = data.get("trades", [])
+
+                self.results["paper_trader"] = {
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "initial_capital": initial,
+                    "current_capital": round(current, 2),
+                    "total_return_pct": round((current - initial) / initial * 100, 2) if initial > 0 else 0,
+                    "total_trades": stats.get("total_trades", 0),
+                    "wins": stats.get("wins", 0),
+                    "losses": stats.get("losses", 0),
+                    "win_rate": round(stats.get("win_rate", 0), 1),
+                    "total_profit": round(stats.get("total_profit", 0), 2),
+                    "total_fees": round(stats.get("total_fees", 0), 2),
+                    "last_updated": data.get("last_updated", "N/A"),
+                    "recent_trades": len(trades)
+                }
+
+                print(f"\n  PAPER TRADER STATUS:")
+                print(f"    Symbol: {symbol}")
+                print(f"    Strategy: {strategy}")
+                print(f"    Initial Capital: ${initial:.2f}")
+                print(f"    Current Capital: ${current:.2f}")
+                print(f"    Total Return: {self.results['paper_trader']['total_return_pct']:+.2f}%")
+                print(f"\n  PERFORMANCE:")
+                print(f"    Total Trades: {stats.get('total_trades', 0)}")
+                print(f"    Wins: {stats.get('wins', 0)} | Losses: {stats.get('losses', 0)}")
+                print(f"    Win Rate: {stats.get('win_rate', 0):.1f}%")
+                print(f"    Net Profit: ${stats.get('total_profit', 0):+.2f}")
+                print(f"    Total Fees: ${stats.get('total_fees', 0):.2f}")
+                print(f"\n  Last Updated: {data.get('last_updated', 'N/A')}")
+
+                # Recent trade summary
+                if trades:
+                    print(f"\n  RECENT TRADES ({len(trades)} total):")
+                    for trade in trades[-3:]:  # Show last 3
+                        pnl = trade.get("net_pnl", 0)
+                        result = "WIN" if pnl > 0 else "LOSS"
+                        print(f"    [{result}] ${pnl:+.4f} ({trade.get('net_pnl_pct', 0):+.2f}%)")
+            else:
+                print("  No paper trading data found.")
+                print("  Run 'python examples/paper_trader.py' to start paper trading.")
+                self.results["paper_trader"] = {"status": "NOT_STARTED"}
+
+        except Exception as e:
+            print(f"  [ERROR] Paper trader status failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["paper_trader"]
+
+    def run_bollinger_alerts(self) -> Dict[str, Any]:
+        """Run protected Bollinger Band alert analysis."""
+        if not HAS_BOLLINGER_ALERTS:
+            print("\n[SKIP] Bollinger alerts - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("PROTECTED BOLLINGER ALERTS")
+        print("(5 Protection Filters: Trend, Volume, First-Touch, Penetration, Time)")
+        print("=" * 60)
+
+        try:
+            # Analyze configured coins
+            for symbol, config in BB_COIN_CONFIG.items():
+                try:
+                    status = bb_analyze_coin(symbol, config)
+
+                    if status:
+                        self.results["bollinger_alerts"][config["name"]] = {
+                            "symbol": symbol,
+                            "price": round(status.current_price, 4),
+                            "lower_band": round(status.lower_band, 4),
+                            "middle_band": round(status.middle_band, 4),
+                            "distance_to_buy": round(status.distance_to_buy, 2),
+                            "signal": status.signal,
+                            "protection_passed": status.protection.passed_count,
+                            "protection_total": 4,
+                            "all_protections_ok": status.protection.all_passed,
+                            "failed_filters": status.protection.get_failed_filters() if hasattr(status.protection, 'get_failed_filters') else [],
+                        }
+
+                        # Print summary
+                        p = status.protection
+                        prot_str = f"{p.passed_count}/4"
+                        if p.all_passed:
+                            prot_str += " ALL OK"
+                        else:
+                            prot_str += f" (Failed: {', '.join(p.get_failed_filters())})"
+
+                        print(f"  {config['name']:6} ${status.current_price:.4f} | "
+                              f"Signal: {status.signal:12} | Protections: {prot_str}")
+                    else:
+                        print(f"  {config['name']:6} Could not fetch data")
+
+                except Exception as e:
+                    print(f"  {config['name']:6} Error: {e}")
+
+            # Print recommendations
+            if self.results["bollinger_alerts"]:
+                strong_buys = [k for k, v in self.results["bollinger_alerts"].items()
+                              if v.get("signal") == "STRONG_BUY"]
+                weak_buys = [k for k, v in self.results["bollinger_alerts"].items()
+                            if v.get("signal") == "WEAK_BUY"]
+                near_buys = [k for k, v in self.results["bollinger_alerts"].items()
+                            if v.get("distance_to_buy", 100) <= 3.0 and v.get("signal") == "HOLD"]
+
+                print(f"\n  RECOMMENDATIONS:")
+                if strong_buys:
+                    print(f"    STRONG BUY (all protections): {', '.join(strong_buys)}")
+                if weak_buys:
+                    print(f"    WEAK BUY (some protections failed): {', '.join(weak_buys)}")
+                if near_buys:
+                    print(f"    WATCH CLOSELY (near buy zone): {', '.join(near_buys)}")
+                if not strong_buys and not weak_buys and not near_buys:
+                    print(f"    No immediate opportunities")
+
+        except Exception as e:
+            print(f"  [ERROR] Bollinger alerts failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["bollinger_alerts"]
+
+    def run_trading_simulation(self) -> Dict[str, Any]:
+        """Run realistic trading simulation with slippage and fees."""
+        if not HAS_SIMULATOR:
+            print("\n[SKIP] Trading simulation - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("TRADING SIMULATION")
+        print("(Realistic Backtesting with Slippage & Fees)")
+        print("=" * 60)
+
+        try:
+            # Create simulator with default config
+            config = SimulationConfig(
+                slippage_bps=5.0,       # 0.05% slippage
+                commission_bps=10.0,    # 0.1% round-trip commission
+                min_notional=10.0,      # $10 minimum trade
+                max_position_size_pct=10.0,
+                max_open_positions=5
+            )
+            simulator = TradingSimulator(config)
+
+            # Simulation parameters
+            params_to_test = [
+                {"tp_pct": 1.5, "sl_pct": 1.0, "name": "Conservative"},
+                {"tp_pct": 2.0, "sl_pct": 1.0, "name": "Balanced"},
+                {"tp_pct": 3.0, "sl_pct": 1.5, "name": "Aggressive"},
+            ]
+
+            print(f"\n  SIMULATION CONFIG:")
+            print(f"    Slippage: {config.slippage_bps} bps ({config.slippage_bps/100:.2f}%)")
+            print(f"    Commission: {config.commission_bps} bps ({config.commission_bps/100:.2f}%)")
+            print(f"    Min Trade: ${config.min_notional}")
+
+            print(f"\n  TESTING PARAMETERS:")
+            for params in params_to_test:
+                # Calculate expected impact of costs
+                total_cost_pct = (config.slippage_bps * 2 + config.commission_bps) / 100
+                tp = params["tp_pct"]
+                sl = params["sl_pct"]
+
+                # Breakeven win rate calculation
+                if (tp + sl) > 0:
+                    raw_be_wr = sl / (tp + sl) * 100
+                    adjusted_be_wr = (sl + total_cost_pct) / (tp + sl) * 100
+                else:
+                    raw_be_wr = 50
+                    adjusted_be_wr = 50
+
+                self.results["simulator"][params["name"]] = {
+                    "tp_pct": tp,
+                    "sl_pct": sl,
+                    "risk_reward": round(tp / sl, 2) if sl > 0 else 0,
+                    "raw_breakeven_wr": round(raw_be_wr, 1),
+                    "adjusted_breakeven_wr": round(adjusted_be_wr, 1),
+                    "cost_impact_pct": round(total_cost_pct, 3),
+                }
+
+                print(f"    {params['name']:12} | TP={tp:.1f}% SL={sl:.1f}% | "
+                      f"R:R={tp/sl:.1f}:1 | Breakeven WR={adjusted_be_wr:.1f}%")
+
+            print(f"\n  COST ANALYSIS:")
+            print(f"    Per-trade cost: ~{total_cost_pct:.3f}%")
+            print(f"    Impact on 100 trades: ~${100 * total_cost_pct:.2f} per $100 position")
+
+            # Recommendation
+            best_rr = max(params_to_test, key=lambda x: x["tp_pct"] / x["sl_pct"])
+            print(f"\n  RECOMMENDATION:")
+            print(f"    Best R:R ratio: {best_rr['name']} strategy")
+            print(f"    To be profitable, aim for win rates above the adjusted breakeven")
+
+        except Exception as e:
+            print(f"  [ERROR] Trading simulation failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["simulator"]
+
+    def run_notification_check(self) -> Dict[str, Any]:
+        """Check notification channel configuration."""
+        if not HAS_NOTIFICATIONS:
+            print("\n[SKIP] Notification check - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("NOTIFICATION CHANNELS")
+        print("(Telegram/Slack/Email Configuration)")
+        print("=" * 60)
+
+        try:
+            from analize.config import get_settings
+            settings = get_settings()
+            notif_settings = settings.notifications
+
+            # Check each channel
+            channels = {
+                "telegram": {
+                    "configured": bool(notif_settings.telegram_bot_token and notif_settings.telegram_chat_id),
+                    "bot_token": "***" + notif_settings.telegram_bot_token[-6:] if notif_settings.telegram_bot_token else None,
+                    "chat_id": notif_settings.telegram_chat_id,
+                },
+                "slack": {
+                    "configured": bool(notif_settings.slack_webhook_url),
+                    "webhook": "***" + notif_settings.slack_webhook_url[-10:] if notif_settings.slack_webhook_url else None,
+                },
+                "email": {
+                    "configured": bool(notif_settings.smtp_host and notif_settings.email_to),
+                    "smtp_host": notif_settings.smtp_host,
+                    "recipients": len(notif_settings.email_to) if notif_settings.email_to else 0,
+                }
+            }
+
+            configured_count = sum(1 for c in channels.values() if c["configured"])
+
+            self.results["notifications"] = {
+                "channels": channels,
+                "configured_count": configured_count,
+                "total_channels": len(channels),
+                "ready": configured_count > 0
+            }
+
+            print(f"\n  CHANNEL STATUS:")
+            for name, info in channels.items():
+                status = "CONFIGURED" if info["configured"] else "NOT CONFIGURED"
+                print(f"    {name.upper():10} {status}")
+
+                if info["configured"]:
+                    if name == "telegram":
+                        print(f"               Bot: {info['bot_token']}")
+                        print(f"               Chat: {info['chat_id']}")
+                    elif name == "slack":
+                        print(f"               Webhook: {info['webhook']}")
+                    elif name == "email":
+                        print(f"               SMTP: {info['smtp_host']}")
+                        print(f"               Recipients: {info['recipients']}")
+
+            print(f"\n  SUMMARY:")
+            print(f"    Configured Channels: {configured_count}/{len(channels)}")
+
+            if configured_count == 0:
+                print(f"\n  [WARN] No notification channels configured!")
+                print(f"    To enable notifications, set environment variables:")
+                print(f"    - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
+                print(f"    - SLACK_WEBHOOK_URL")
+                print(f"    - SMTP_HOST + EMAIL_TO")
+            else:
+                print(f"    Ready to send alerts via: {', '.join(k.upper() for k, v in channels.items() if v['configured'])}")
+
+        except Exception as e:
+            print(f"  [ERROR] Notification check failed: {e}")
+            # Still provide basic info even on error
+            self.results["notifications"] = {
+                "channels": {},
+                "configured_count": 0,
+                "total_channels": 3,
+                "ready": False,
+                "error": str(e)
+            }
+
+        return self.results["notifications"]
+
     def calculate_aggregated_signals(self) -> Dict[str, Any]:
         """Calculate weighted consensus signals for all symbols."""
         print("\n" + "=" * 60)
@@ -2074,7 +2421,7 @@ class MasterAnalyzer:
     def run_full_analysis(self) -> Dict[str, Any]:
         """Run all analyses and return comprehensive results."""
         print("\n" + "=" * 70)
-        print("MASTER ANALYSIS - Running All 19 Tools")
+        print("MASTER ANALYSIS - Running All 23 Tools")
         print(f"Timestamp: {self.timestamp}")
         print(f"Symbols: {', '.join(self.symbols)}")
         print("=" * 70)
@@ -2098,8 +2445,12 @@ class MasterAnalyzer:
         self.run_mfe_mae_analysis()           # Tool 16: MFE/MAE outcome analysis
         self.run_stats_breakdown()            # Tool 17: Comprehensive stats breakdown
         self.run_data_quality_check()         # Tool 18: Data quality & provenance
+        self.run_paper_trader_status()        # Tool 19: Paper trading status
+        self.run_bollinger_alerts()           # Tool 20: Protected Bollinger alerts
+        self.run_trading_simulation()         # Tool 21: Realistic backtesting
+        self.run_notification_check()         # Tool 22: Notification channels
 
-        # Calculate aggregated signals (Tool 19)
+        # Calculate aggregated signals (Tool 23)
         self.calculate_aggregated_signals()
 
         # Print summary
