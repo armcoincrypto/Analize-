@@ -98,6 +98,94 @@ class FundingRateFetcher:
         self.cache = {}
         self.symbols = ["XRPUSDT", "SOLUSDT", "ATOMUSDT", "BTCUSDT", "ETHUSDT"]
 
+    def fetch_funding_with_fallbacks(self, symbol: str) -> Optional[FundingRate]:
+        """Fetch funding rate with multiple fallbacks."""
+        # Try Bybit first (usually works globally)
+        rate = self.fetch_bybit_funding(symbol)
+        if rate:
+            return rate
+
+        # Try OKX
+        rate = self.fetch_okx_funding(symbol)
+        if rate:
+            return rate
+
+        # Try Binance
+        rate = self.fetch_binance_funding(symbol)
+        if rate:
+            return rate
+
+        return None
+
+    def fetch_bybit_funding(self, symbol: str) -> Optional[FundingRate]:
+        """Fetch current funding rate from Bybit."""
+        try:
+            url = "https://api.bybit.com/v5/market/tickers"
+            params = {"category": "linear", "symbol": symbol}
+
+            response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("result", {}).get("list"):
+                    ticker = data["result"]["list"][0]
+                    rate = float(ticker.get("fundingRate", 0)) * 100  # Convert to percentage
+
+                    next_time = ticker.get("nextFundingTime", "0")
+                    if next_time:
+                        next_funding = datetime.fromtimestamp(int(next_time) / 1000)
+                    else:
+                        next_funding = datetime.now()
+
+                    return FundingRate(
+                        symbol=symbol,
+                        exchange="BYBIT",
+                        rate=rate,
+                        next_funding_time=next_funding,
+                        interval_hours=8,
+                        annualized_rate=rate * 3 * 365
+                    )
+        except Exception as e:
+            pass
+
+        return None
+
+    def fetch_okx_funding(self, symbol: str) -> Optional[FundingRate]:
+        """Fetch current funding rate from OKX."""
+        try:
+            # OKX uses different symbol format: XRP-USDT-SWAP
+            okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
+
+            url = "https://www.okx.com/api/v5/public/funding-rate"
+            params = {"instId": okx_symbol}
+
+            response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("data"):
+                    item = data["data"][0]
+                    rate = float(item.get("fundingRate", 0)) * 100
+
+                    next_time = item.get("nextFundingTime", "0")
+                    if next_time:
+                        next_funding = datetime.fromtimestamp(int(next_time) / 1000)
+                    else:
+                        next_funding = datetime.now()
+
+                    return FundingRate(
+                        symbol=symbol,
+                        exchange="OKX",
+                        rate=rate,
+                        next_funding_time=next_funding,
+                        interval_hours=8,
+                        annualized_rate=rate * 3 * 365
+                    )
+        except Exception as e:
+            pass
+
+        return None
+
     def fetch_binance_funding(self, symbol: str) -> Optional[FundingRate]:
         """Fetch current funding rate from Binance Futures."""
         try:
@@ -152,55 +240,63 @@ class FundingRateFetcher:
                         columns={"fundingTime": "timestamp", "fundingRate": "rate"}
                     )
         except Exception as e:
-            print(f"Binance history fetch error for {symbol}: {e}")
+            pass  # Silent fail, will use fallback
 
         return pd.DataFrame()
 
-    def fetch_bybit_funding(self, symbol: str) -> Optional[FundingRate]:
-        """Fetch current funding rate from Bybit."""
+    def fetch_bybit_funding_history(self, symbol: str, days: int = 30) -> pd.DataFrame:
+        """Fetch historical funding rates from Bybit."""
         try:
-            url = "https://api.bybit.com/v5/market/tickers"
-            params = {"category": "linear", "symbol": symbol}
+            url = "https://api.bybit.com/v5/market/funding/history"
+            end_time = int(datetime.now().timestamp() * 1000)
+            start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-            response = requests.get(url, params=params, timeout=10)
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "startTime": start_time,
+                "endTime": end_time,
+                "limit": 200
+            }
+
+            response = requests.get(url, params=params, timeout=15)
 
             if response.status_code == 200:
                 data = response.json()
+
                 if data.get("result", {}).get("list"):
-                    ticker = data["result"]["list"][0]
-                    rate = float(ticker.get("fundingRate", 0)) * 100
+                    records = data["result"]["list"]
+                    df = pd.DataFrame(records)
+                    df["timestamp"] = pd.to_datetime(df["fundingRateTimestamp"].astype(int), unit="ms")
+                    df["rate"] = df["fundingRate"].astype(float) * 100
 
-                    return FundingRate(
-                        symbol=symbol,
-                        exchange="BYBIT",
-                        rate=rate,
-                        next_funding_time=datetime.fromtimestamp(
-                            int(ticker.get("nextFundingTime", 0)) / 1000
-                        ),
-                        interval_hours=8,
-                        annualized_rate=rate * 3 * 365
-                    )
+                    return df[["timestamp", "rate"]].sort_values("timestamp")
         except Exception as e:
-            pass
+            pass  # Silent fail
 
-        return None
+        return pd.DataFrame()
 
     def fetch_all_funding_rates(self) -> Dict[str, List[FundingRate]]:
-        """Fetch funding rates from all exchanges."""
+        """Fetch funding rates from all exchanges with fallbacks."""
         results = {}
 
         for symbol in self.symbols:
             rates = []
 
-            # Binance
-            binance_rate = self.fetch_binance_funding(symbol)
-            if binance_rate:
-                rates.append(binance_rate)
-
-            # Bybit
+            # Try Bybit first (works globally)
             bybit_rate = self.fetch_bybit_funding(symbol)
             if bybit_rate:
                 rates.append(bybit_rate)
+
+            # Try OKX
+            okx_rate = self.fetch_okx_funding(symbol)
+            if okx_rate:
+                rates.append(okx_rate)
+
+            # Try Binance
+            binance_rate = self.fetch_binance_funding(symbol)
+            if binance_rate:
+                rates.append(binance_rate)
 
             if rates:
                 results[symbol] = rates
@@ -322,12 +418,38 @@ class FundingRateAnalyzer:
 
     def analyze_symbol(self, symbol: str) -> FundingAnalysis:
         """Perform full funding rate analysis for a symbol."""
-        # Get current rate
-        current = self.fetcher.fetch_binance_funding(symbol)
+        # Get current rate with fallbacks
+        current = self.fetcher.fetch_funding_with_fallbacks(symbol)
         current_rate = current.rate if current else 0
+        exchange = current.exchange if current else "UNKNOWN"
 
-        # Get historical data
-        history = self.fetcher.fetch_binance_funding_history(symbol, days=30)
+        # Get historical data (try Bybit history first, then Binance)
+        history = self.fetcher.fetch_bybit_funding_history(symbol, days=30)
+        if history.empty:
+            history = self.fetcher.fetch_binance_funding_history(symbol, days=30)
+
+        if history.empty and current:
+            # No history but have current - provide basic analysis
+            signal = "NEUTRAL"
+            explanation = f"Current rate from {exchange}"
+
+            if current_rate > 0.05:
+                signal = "BEARISH"
+                explanation = f"High positive funding ({current_rate:.3f}%) - longs paying"
+            elif current_rate < -0.05:
+                signal = "BULLISH"
+                explanation = f"Negative funding ({current_rate:.3f}%) - shorts paying"
+
+            return FundingAnalysis(
+                symbol=symbol,
+                current_rate=current_rate,
+                avg_rate_7d=current_rate,
+                avg_rate_30d=current_rate,
+                percentile=50,
+                trend="UNKNOWN",
+                signal=signal,
+                explanation=explanation
+            )
 
         if history.empty:
             return FundingAnalysis(
