@@ -1486,6 +1486,31 @@ class QuantDatabase:
         finally:
             self._close_connection(conn)
 
+    def get_trade_pnl_series(self) -> List[float]:
+        """
+        Get list of trade PnL percentages for metrics calculation.
+
+        Returns:
+            List of PnL percentages from closed trades (empty if no trades)
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                SELECT pnl_percent
+                FROM trades
+                WHERE pnl_percent IS NOT NULL
+                  AND outcome IN ('WIN', 'LOSS', 'BREAKEVEN')
+                ORDER BY exit_timestamp ASC
+            """)
+            rows = cursor.fetchall()
+            return [float(row['pnl_percent']) for row in rows if row['pnl_percent'] is not None]
+        except Exception:
+            return []
+        finally:
+            self._close_connection(conn)
+
     def get_database_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
         conn = self._get_connection()

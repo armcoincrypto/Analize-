@@ -122,9 +122,27 @@ class TradingMetrics:
         if equity_curve.empty:
             return 0.0, 0, 0
 
-        cumulative = equity_curve.cumsum() if equity_curve.iloc[0] != equity_curve.sum() else equity_curve
-        running_max = cumulative.cummax()
-        drawdown = (cumulative - running_max) / running_max * 100
+        # Handle both individual returns and cumulative equity
+        if equity_curve.iloc[0] != equity_curve.sum():
+            cumulative = equity_curve.cumsum()
+        else:
+            cumulative = equity_curve.copy()
+
+        # Add starting capital (100%) to convert returns to equity
+        # This ensures we're calculating drawdown from equity, not just returns
+        equity = 100.0 + cumulative  # Start at 100%, add cumulative returns
+
+        # Ensure equity doesn't go negative for drawdown calculation
+        # (If equity goes to 0 or negative, that's a -100% drawdown, cap it there)
+        running_max = equity.cummax()
+
+        # Protect against division by zero
+        running_max = running_max.replace(0, np.nan)
+        drawdown = (equity - running_max) / running_max * 100
+        drawdown = drawdown.fillna(-100.0)  # If running_max was 0, assume -100% drawdown
+
+        # Cap drawdown at -100% (can't lose more than 100%)
+        drawdown = drawdown.clip(lower=-100.0)
 
         max_dd = drawdown.min()
         trough_idx = int(drawdown.idxmin()) if not pd.isna(drawdown.idxmin()) else 0

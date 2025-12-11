@@ -433,23 +433,33 @@ class MasterAnalyzer:
                 if flow:
                     net_flow = flow.net_flow_24h
 
+                    # WHALE FLOW CLASSIFICATION:
+                    # - EXCHANGE OUTFLOW (negative net_flow) = coins LEAVING exchanges
+                    #   -> Bullish: holders moving to cold storage (accumulation)
+                    # - EXCHANGE INFLOW (positive net_flow) = coins ENTERING exchanges
+                    #   -> Bearish: holders preparing to sell
+
                     # Determine signal based on net flow
-                    # Outflow (negative) = bullish (coins leaving exchanges)
-                    # Inflow (positive) = bearish (coins entering exchanges)
-                    if net_flow < -1000000:  # Large outflow
+                    if net_flow < -1000000:  # Large outflow from exchanges
                         direction = "BUY"
+                        flow_type = "EXCHANGE_OUTFLOW"
+                        flow_meaning = "accumulation (coins leaving exchanges)"
                         confidence = min(abs(net_flow) / 50000000, 0.85)
-                    elif net_flow > 1000000:  # Large inflow
+                    elif net_flow > 1000000:  # Large inflow to exchanges
                         direction = "SELL"
+                        flow_type = "EXCHANGE_INFLOW"
+                        flow_meaning = "distribution (coins entering exchanges)"
                         confidence = min(abs(net_flow) / 50000000, 0.85)
                     else:
                         direction = "NEUTRAL"
+                        flow_type = "BALANCED"
+                        flow_meaning = "no significant flow"
                         confidence = 0.5
 
                     activity = WhaleActivity(
                         symbol=f"{symbol}USDT",
                         timestamp=self.timestamp,
-                        activity_type="exchange_flow",
+                        activity_type=flow_type.lower(),
                         amount_usd=abs(net_flow) if net_flow else 0,
                         signal_direction=direction,
                         confidence=confidence,
@@ -462,9 +472,11 @@ class MasterAnalyzer:
                         "net_flow": net_flow,
                         "direction": direction,
                         "confidence": confidence,
-                        "signal": flow_dir
+                        "signal": flow_dir,
+                        "flow_type": flow_type,
+                        "interpretation": flow_meaning
                     }
-                    print(f"  {symbol}: ${abs(net_flow):,.0f} {flow_dir} -> {direction}")
+                    print(f"  {symbol}: ${abs(net_flow):,.0f} {flow_dir} ({flow_meaning}) -> {direction}")
                 else:
                     print(f"  {symbol}: No exchange flow data")
         except Exception as e:
@@ -529,7 +541,11 @@ class MasterAnalyzer:
                         "direction": direction,
                         "confidence": confidence
                     }
-                    print(f"  {symbol}: Funding {rate:.4%} -> {direction}")
+                    # Note: rate is already a percentage (e.g., 0.01 = 0.01%)
+                    # Don't use :.4% format as it multiplies by 100 again
+                    # Typical funding rates: -0.05% to +0.05% per 8hr period
+                    rate_display = f"{rate:.4f}%" if abs(rate) < 1 else f"{rate:.2f}%"
+                    print(f"  {symbol}: Funding {rate_display} (per 8hr) -> {direction}")
                 else:
                     print(f"  {symbol}: Unable to fetch funding rate")
         except Exception as e:
@@ -636,7 +652,30 @@ class MasterAnalyzer:
                     # MLSignal has: .prediction (BUY/SELL/HOLD), .confidence,
                     # .probability_up, .probability_down, .model_name
                     direction = result.prediction
-                    confidence = result.confidence
+                    raw_confidence = result.confidence
+
+                    # CRITICAL: Calibrate confidence based on model accuracy
+                    # Raw confidence is often overfit; reduce it when accuracy is low
+                    best_accuracy = max(p.accuracy for p in performance.values()) if performance else 0.5
+
+                    # If accuracy < 55%, model is near random - reduce confidence significantly
+                    # Calibration: scale confidence by (accuracy - 0.5) * 2 + 0.5
+                    # This maps: 50% accuracy -> 0.5x, 75% accuracy -> 1.0x
+                    if best_accuracy < 0.55:
+                        accuracy_multiplier = 0.3  # Near random, very low confidence
+                        confidence_note = " [UNRELIABLE - near random]"
+                    elif best_accuracy < 0.60:
+                        accuracy_multiplier = 0.6
+                        confidence_note = " [WEAK MODEL]"
+                    elif best_accuracy < 0.65:
+                        accuracy_multiplier = 0.8
+                        confidence_note = ""
+                    else:
+                        accuracy_multiplier = 1.0
+                        confidence_note = ""
+
+                    calibrated_confidence = min(raw_confidence * accuracy_multiplier, 0.95)
+
                     # Calculate expected return from probabilities
                     predicted_return = (result.probability_up - result.probability_down) * 10
 
@@ -646,23 +685,27 @@ class MasterAnalyzer:
                         model_name=result.model_name,
                         predicted_direction=direction,
                         predicted_return=predicted_return,
-                        confidence=confidence,
+                        confidence=calibrated_confidence,
                         feature_importance=json.dumps(
-                            {"features_used": result.features_used}
+                            {"features_used": result.features_used,
+                             "raw_confidence": raw_confidence,
+                             "accuracy_multiplier": accuracy_multiplier}
                         ),
                         model_version="1.0",
-                        validation_score=list(performance.values())[0].accuracy if performance else None
+                        validation_score=best_accuracy
                     )
                     self.db.insert_ml_prediction(pred)
 
                     self.results["ml"][symbol] = {
                         "direction": direction,
-                        "confidence": confidence,
+                        "confidence": calibrated_confidence,
+                        "raw_confidence": raw_confidence,
                         "predicted_return": predicted_return,
-                        "model": result.model_name
+                        "model": result.model_name,
+                        "accuracy": best_accuracy
                     }
-                    print(f"  {symbol}: {direction} (conf: {confidence:.2f}, "
-                          f"prob_up: {result.probability_up:.1%})")
+                    print(f"  {symbol}: {direction} (conf: {calibrated_confidence:.2f}, "
+                          f"prob_up: {result.probability_up:.1%}){confidence_note}")
                 else:
                     print(f"  {symbol}: Unable to generate ML signal")
         except Exception as e:
@@ -699,9 +742,14 @@ class MasterAnalyzer:
 
                     if len(close) >= 20:
                         # Calculate RSI using TechnicalIndicators (accurate calculation)
+                        rsi_defaulted = False
                         if HAS_ADVANCED_INDICATORS:
                             rsi_series = TechnicalIndicators.rsi(close, period=14)
-                            rsi_value = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
+                            if pd.isna(rsi_series.iloc[-1]):
+                                rsi_value = 50.0
+                                rsi_defaulted = True
+                            else:
+                                rsi_value = float(rsi_series.iloc[-1])
                         else:
                             # Fallback RSI calculation
                             delta = close.diff()
@@ -711,7 +759,15 @@ class MasterAnalyzer:
                             avg_loss = loss.ewm(span=14, adjust=False).mean()
                             rs = avg_gain / avg_loss.replace(0, np.inf)
                             rsi_series = 100 - (100 / (1 + rs))
-                            rsi_value = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
+                            if pd.isna(rsi_series.iloc[-1]):
+                                rsi_value = 50.0
+                                rsi_defaulted = True
+                            else:
+                                rsi_value = float(rsi_series.iloc[-1])
+
+                        # Warn if RSI defaulted - indicates data issue
+                        if rsi_defaulted:
+                            print(f"  [WARN] {symbol}: RSI defaulted to 50.0 (check price data)")
 
                         # Calculate Bollinger Bands
                         bb_period = 20
@@ -1468,24 +1524,54 @@ class MasterAnalyzer:
                       f"-> Total={score_result['total_score']}/{score_result['threshold']} -> {signal}")
 
             # 3. Walk-Forward Validation (simplified - just show structure)
+            # Store validator results
+            # NOTE: In production, run actual walk-forward validation
             print("\n  3. WALK-FORWARD VALIDATION STATUS")
             print("     Strategy tested: Bollinger Mean Reversion")
             print("     Training: 6 months, Testing: 3 months, Step: 1 month")
-
-            # Store validator results
             wf_coins = ["XRP", "SOL", "ATOM"]
             wf_results = {}
+
             for coin in [c for c in self.symbols if c in wf_coins]:
-                # Simulated results (in production, would run actual validation)
-                wf_results[coin] = {
-                    "windows": 8,
-                    "profitable": np.random.randint(4, 8),
-                    "consistency": np.random.uniform(50, 80),
-                    "avg_return": np.random.uniform(-1, 5)
-                }
-                status = "STABLE" if wf_results[coin]["consistency"] >= 60 else "MODERATE"
-                print(f"     {coin}: {wf_results[coin]['profitable']}/{wf_results[coin]['windows']} profitable "
-                      f"({wf_results[coin]['consistency']:.0f}%) -> {status}")
+                # Run actual walk-forward if available, otherwise note lack of data
+                if HAS_VALIDATOR:
+                    try:
+                        validator = WalkForwardValidator()
+                        result = validator.validate(f"{coin}USDT")
+                        wf_results[coin] = {
+                            "windows": result.total_windows,
+                            "profitable": result.profitable_windows,
+                            "consistency": result.consistency_rate,  # This is profitable/total * 100
+                            "avg_return": result.avg_test_return
+                        }
+                    except Exception:
+                        # Fallback: mark as needing validation
+                        wf_results[coin] = {
+                            "windows": 0,
+                            "profitable": 0,
+                            "consistency": 0,
+                            "avg_return": 0,
+                            "needs_validation": True
+                        }
+                else:
+                    wf_results[coin] = {
+                        "windows": 0,
+                        "profitable": 0,
+                        "consistency": 0,
+                        "avg_return": 0,
+                        "needs_validation": True
+                    }
+
+                windows = wf_results[coin]["windows"]
+                profitable = wf_results[coin]["profitable"]
+                # FIXED: Calculate actual percentage from profitable/windows
+                actual_pct = (profitable / windows * 100) if windows > 0 else 0
+                status = "STABLE" if actual_pct >= 60 else ("MODERATE" if actual_pct >= 40 else "NEEDS_DATA")
+
+                if wf_results[coin].get("needs_validation"):
+                    print(f"     {coin}: No validation data - run walk-forward test")
+                else:
+                    print(f"     {coin}: {profitable}/{windows} profitable ({actual_pct:.0f}%) -> {status}")
 
             self.results["validator"] = {
                 "regime": regime.to_dict(),
@@ -1527,10 +1613,13 @@ class MasterAnalyzer:
                 if symbol in self.results.get("funding", {}):
                     funding = self.results["funding"][symbol]
                     if funding.get("direction") in ["STRONG_BUY", "STRONG_SELL"]:
+                        # Note: rate is already a percentage, don't use :.4% format
+                        rate = funding.get('rate', 0)
+                        rate_str = f"{rate:.4f}%" if abs(rate) < 1 else f"{rate:.2f}%"
                         symbol_alerts.append({
                             "source": "FUNDING",
                             "signal": funding["direction"],
-                            "reason": f"Rate: {funding.get('rate', 0):.4%}"
+                            "reason": f"Rate: {rate_str}/8hr"
                         })
 
                 # ML prediction alerts
@@ -1573,20 +1662,23 @@ class MasterAnalyzer:
             if not alerts:
                 print("\n  No strong signals detected across all sources")
 
-            # Check if Telegram is configured
+            # Check alert service configuration (legacy file-based)
+            # Note: This is different from run_notification_check() which checks env-based NotificationSender
             if HAS_ALERTS:
                 config_path = os.path.join(os.path.dirname(__file__), "alert_config.json")
                 if os.path.exists(config_path):
-                    print("\n  Telegram alerts: CONFIGURED")
+                    print("\n  Alert Service (file-based): CONFIGURED via alert_config.json")
                 else:
-                    print("\n  Telegram alerts: Not configured (create alert_config.json)")
+                    print("\n  Alert Service (file-based): Not configured (create alert_config.json)")
+                print("  Note: See Tool #22 for Telegram/Slack/Email notification channels")
             else:
-                print("\n  Alert service: Not available")
+                print("\n  Alert service: Module not available")
 
             self.results["alerts"] = {
                 "count": len(alerts),
                 "alerts": alerts,
-                "telegram_configured": HAS_ALERTS
+                "alert_service_available": HAS_ALERTS,
+                "alert_config_exists": os.path.exists(os.path.join(os.path.dirname(__file__), "alert_config.json")) if HAS_ALERTS else False
             }
 
         except Exception as e:
@@ -1614,20 +1706,28 @@ class MasterAnalyzer:
             stats = self.db.get_database_stats()
             signal_count = stats["record_counts"].get("Technical Signals", 0)
 
-            if signal_count < 30:
-                print("  Generating simulated trade data for significance testing...")
-                # Create simulated PnL data for demo
+            # CRITICAL: Use real trade data for significance testing!
+            trade_pnl = self.db.get_trade_pnl_series() if hasattr(self.db, 'get_trade_pnl_series') else []
+
+            if trade_pnl and len(trade_pnl) >= 30:
+                print(f"  Using {len(trade_pnl)} actual trades for testing...")
+                pnl_data = np.array(trade_pnl)
+                wins = int((pnl_data > 0).sum())
+                total = len(pnl_data)
+            elif signal_count >= 30:
+                print(f"  [WARN] No trade data - using conservative placeholder (NOT RELIABLE)")
+                print(f"  [WARN] Run paper_trader.py to generate real trade data!")
+                # Use neutral data to avoid misleading significance
                 np.random.seed(42)
-                pnl_data = np.random.normal(1.5, 5.0, 100)  # Mean 1.5%, std 5%
+                pnl_data = np.random.normal(0.0, 1.0, min(signal_count, 100))  # Mean 0 = no edge
                 wins = int((pnl_data > 0).sum())
                 total = len(pnl_data)
             else:
-                # In production, would extract actual trade results
-                print(f"  Using {signal_count} signals for testing...")
-                np.random.seed(int(datetime.utcnow().timestamp()) % 1000)
-                pnl_data = np.random.normal(1.2, 4.5, min(signal_count, 200))
-                wins = int((pnl_data > 0).sum())
-                total = len(pnl_data)
+                print("  [WARN] Insufficient data for significance testing (need 30+ trades)")
+                print("  [WARN] Run paper_trader.py to generate real trade data!")
+                pnl_data = np.array([0.0] * 30)  # Neutral placeholder
+                wins = 15
+                total = 30
 
             # 1. Win Rate Significance Test
             print("\n  1. WIN RATE SIGNIFICANCE TEST")
@@ -1693,14 +1793,25 @@ class MasterAnalyzer:
             stats = self.db.get_database_stats()
             signal_count = stats["record_counts"].get("Technical Signals", 0)
 
-            if signal_count < 20:
-                print("  Generating simulated trade data for metrics...")
+            # CRITICAL: Use real trade data, not simulated random data!
+            # First try to get actual trade outcomes from database
+            trade_pnl = self.db.get_trade_pnl_series() if hasattr(self.db, 'get_trade_pnl_series') else []
+
+            if trade_pnl and len(trade_pnl) >= 20:
+                print(f"  Calculating metrics from {len(trade_pnl)} actual trades...")
+                pnl_series = pd.Series(trade_pnl)
+            elif signal_count >= 20:
+                # Fall back to estimating PnL from signal performance if no trades
+                print(f"  [WARN] No trade data - estimating from {signal_count} signals (NOT RELIABLE)...")
+                print(f"  [WARN] Run paper_trader.py to generate real trade data!")
+                # Use very conservative estimates to avoid misleading metrics
                 np.random.seed(42)
-                pnl_series = pd.Series(np.random.normal(1.2, 4.0, 100))
+                pnl_series = pd.Series(np.random.normal(0.0, 2.0, min(signal_count, 100)))  # Mean 0, smaller variance
             else:
-                print(f"  Calculating metrics from {signal_count} signals...")
-                np.random.seed(int(datetime.utcnow().timestamp()) % 1000)
-                pnl_series = pd.Series(np.random.normal(1.0, 3.5, min(signal_count, 200)))
+                print("  [WARN] Insufficient data for metrics (need 20+ trades)")
+                print("  [WARN] Run paper_trader.py to generate real trade data!")
+                # Minimal placeholder with conservative values
+                pnl_series = pd.Series([0.0] * 20)  # Neutral placeholder
 
             # Calculate all metrics
             metrics = TradingMetrics.calculate_all(pnl_series)

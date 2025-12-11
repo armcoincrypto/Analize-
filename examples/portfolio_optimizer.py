@@ -266,37 +266,58 @@ class PortfolioOptimizer:
         weights = {asset: 1.0 / self.n_assets for asset in self.assets}
         return self._create_allocation("Equal Weight", weights)
 
-    def max_sharpe(self) -> PortfolioAllocation:
-        """Maximum Sharpe ratio portfolio."""
+    def max_sharpe(self, max_weight: float = 0.20) -> PortfolioAllocation:
+        """
+        Maximum Sharpe ratio portfolio with per-asset constraints.
+
+        Args:
+            max_weight: Maximum weight per asset (default 20% to prevent overconcentration)
+        """
         def neg_sharpe(weights):
             port_return = np.dot(weights, self.mean_returns)
             port_vol = np.sqrt(np.dot(weights.T, np.dot(self.cov_matrix, weights)))
+            if port_vol == 0:
+                return 0
             return -(port_return - self.risk_free_rate) / port_vol
 
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-        bounds = tuple((0, 1) for _ in range(self.n_assets))
+        # CRITICAL: Cap per-asset allocation to prevent 100% single-asset recommendations
+        # In crypto, unconstrained optimization often produces unstable corner solutions
+        bounds = tuple((0.01, max_weight) for _ in range(self.n_assets))  # Min 1%, Max 20%
         initial = np.array([1.0 / self.n_assets] * self.n_assets)
 
         result = minimize(neg_sharpe, initial, method='SLSQP',
                           bounds=bounds, constraints=constraints)
 
-        weights = {asset: w for asset, w in zip(self.assets, result.x)}
-        return self._create_allocation("Max Sharpe", weights)
+        weights = {asset: max(0.01, min(max_weight, w)) for asset, w in zip(self.assets, result.x)}
+        # Renormalize in case of numerical issues
+        total = sum(weights.values())
+        weights = {k: v/total for k, v in weights.items()}
+        return self._create_allocation(f"Max Sharpe (capped {max_weight:.0%})", weights)
 
-    def min_volatility(self) -> PortfolioAllocation:
-        """Minimum volatility portfolio."""
+    def min_volatility(self, max_weight: float = 0.30) -> PortfolioAllocation:
+        """
+        Minimum volatility portfolio with per-asset constraints.
+
+        Args:
+            max_weight: Maximum weight per asset (default 30% for min-vol)
+        """
         def portfolio_volatility(weights):
             return np.sqrt(np.dot(weights.T, np.dot(self.cov_matrix, weights)))
 
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-        bounds = tuple((0, 1) for _ in range(self.n_assets))
+        # Cap per-asset allocation to prevent 100% single-asset recommendations
+        bounds = tuple((0.01, max_weight) for _ in range(self.n_assets))
         initial = np.array([1.0 / self.n_assets] * self.n_assets)
 
         result = minimize(portfolio_volatility, initial, method='SLSQP',
                           bounds=bounds, constraints=constraints)
 
-        weights = {asset: w for asset, w in zip(self.assets, result.x)}
-        return self._create_allocation("Min Volatility", weights)
+        weights = {asset: max(0.01, min(max_weight, w)) for asset, w in zip(self.assets, result.x)}
+        # Renormalize in case of numerical issues
+        total = sum(weights.values())
+        weights = {k: v/total for k, v in weights.items()}
+        return self._create_allocation(f"Min Volatility (capped {max_weight:.0%})", weights)
 
     def risk_parity(self) -> PortfolioAllocation:
         """Risk parity allocation (equal risk contribution)."""
