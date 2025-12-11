@@ -17,10 +17,18 @@ import json
 from typing import Optional
 from analize.features.indicators import TechnicalIndicators
 
+# Import quant database for trade persistence
+try:
+    from quant_database import QuantDatabase, Trade as DBTrade
+    HAS_QUANT_DB = True
+except ImportError:
+    HAS_QUANT_DB = False
+
 
 # Configuration
 DB_PATH = Path(__file__).parent.parent / "data" / "market_data.db"
 TRADES_LOG = Path(__file__).parent.parent / "data" / "paper_trades.json"
+QUANT_DB_PATH = Path(__file__).parent / "quant_signals.db"
 
 # Trading costs
 TRADING_FEE_PCT = 0.1
@@ -79,6 +87,18 @@ class PaperTrader:
     # Data buffer for indicators
     price_buffer: list = field(default_factory=list)
     buffer_size: int = 100
+
+    # Quant database for trade persistence
+    quant_db: Optional[any] = None
+
+    def __post_init__(self):
+        """Initialize quant database if available."""
+        if HAS_QUANT_DB:
+            try:
+                self.quant_db = QuantDatabase(str(QUANT_DB_PATH))
+                print(f"  [DB] Connected to quant database: {QUANT_DB_PATH}")
+            except Exception as e:
+                print(f"  [WARN] Could not connect to quant DB: {e}")
 
     def fetch_current_price(self) -> Optional[dict]:
         """Fetch current price from Binance."""
@@ -230,6 +250,36 @@ class PaperTrader:
         )
         self.trades.append(trade)
 
+        # Save to quant database for metrics analysis
+        if self.quant_db and HAS_QUANT_DB:
+            try:
+                # Determine outcome
+                if net_pnl_pct > 0.5:
+                    outcome = "WIN"
+                elif net_pnl_pct < -0.5:
+                    outcome = "LOSS"
+                else:
+                    outcome = "BREAKEVEN"
+
+                db_trade = DBTrade(
+                    symbol=self.symbol,
+                    entry_timestamp=self.position.entry_time.isoformat() + "Z",
+                    entry_price=self.position.entry_price,
+                    position_size=entry_value,
+                    direction="LONG" if self.position.side == "long" else "SHORT",
+                    exit_timestamp=datetime.now().isoformat() + "Z",
+                    exit_price=price,
+                    pnl_percent=net_pnl_pct,
+                    pnl_usd=net_pnl,
+                    outcome=outcome,
+                    signals_used=json.dumps([self.strategy_name]),
+                    notes=f"Paper trade via {self.strategy_name}"
+                )
+                self.quant_db.insert_trade(db_trade)
+                print(f"  [DB] Trade saved to database")
+            except Exception as e:
+                print(f"  [WARN] Could not save to DB: {e}")
+
         result = "WIN ✓" if net_pnl > 0 else "LOSS ✗"
 
         print(f"\n{'='*50}")
@@ -376,11 +426,23 @@ def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60):
             # Get signal
             signal = trader.calculate_signal(df)
 
-            # Execute trades
-            if signal == "BUY" and not trader.position.is_open:
-                trader.open_position(current_price, signal)
-            elif signal == "SELL" and trader.position.is_open:
-                trader.close_position(current_price)
+            # Execute trades - support both LONG and SHORT positions
+            if signal == "BUY":
+                if not trader.position.is_open:
+                    # Open new LONG position
+                    trader.open_position(current_price, signal)
+                elif trader.position.side == "short":
+                    # Close SHORT and open LONG (reversal)
+                    trader.close_position(current_price)
+                    trader.open_position(current_price, signal)
+            elif signal == "SELL":
+                if not trader.position.is_open:
+                    # Open new SHORT position
+                    trader.open_position(current_price, signal)
+                elif trader.position.side == "long":
+                    # Close LONG and open SHORT (reversal)
+                    trader.close_position(current_price)
+                    trader.open_position(current_price, signal)
 
             # Print status
             trader.print_status(current_price, signal, k_value)
