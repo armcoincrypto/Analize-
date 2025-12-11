@@ -80,6 +80,25 @@ try:
 except ImportError as e:
     print(f"[WARN] signal_aggregator not available: {e}")
 
+# Portfolio Optimizer
+HAS_PORTFOLIO = False
+try:
+    from examples.portfolio_optimizer import (
+        PortfolioDataFetcher, AssetStatisticsCalculator,
+        PortfolioOptimizer, BlackLittermanOptimizer, RiskMetricsCalculator
+    )
+    HAS_PORTFOLIO = True
+except ImportError as e:
+    print(f"[WARN] portfolio_optimizer not available: {e}")
+
+# Market Analyzer (RSI, MACD, Bollinger)
+HAS_MARKET = False
+try:
+    from examples.market_analyzer import MarketAnalyzer
+    HAS_MARKET = True
+except ImportError as e:
+    print(f"[WARN] market_analyzer not available: {e}")
+
 
 class MasterAnalyzer:
     """
@@ -113,6 +132,8 @@ class MasterAnalyzer:
             "funding": {},
             "orderflow": {},
             "ml": {},
+            "technical": {},  # RSI, MACD, Bollinger
+            "portfolio": {},  # Optimal allocations
             "aggregated": {}
         }
 
@@ -473,6 +494,204 @@ class MasterAnalyzer:
 
         return self.results["ml"]
 
+    def run_technical_analysis(self) -> Dict[str, Any]:
+        """Run technical indicators (RSI, MACD, Bollinger) analysis."""
+        if not HAS_MARKET:
+            print("\n[SKIP] Technical analysis - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("TECHNICAL INDICATORS (RSI, Bollinger, Volume)")
+        print("=" * 60)
+
+        try:
+            analyzer = MarketAnalyzer()
+
+            for symbol in self.symbols:
+                result = analyzer.analyze_coin(symbol, days=90)
+
+                if result and result.technical:
+                    tech = result.technical
+
+                    # Determine signal direction based on indicators
+                    score = tech.score
+                    if score >= 3:
+                        direction = "STRONG_BUY"
+                        confidence = 0.85
+                    elif score >= 2:
+                        direction = "BUY"
+                        confidence = 0.7
+                    elif score <= -2:
+                        direction = "STRONG_SELL"
+                        confidence = 0.85
+                    elif score <= -1:
+                        direction = "SELL"
+                        confidence = 0.7
+                    else:
+                        direction = "NEUTRAL"
+                        confidence = 0.5
+
+                    # Store RSI signal
+                    rsi_signal = TechnicalSignal(
+                        symbol=f"{symbol}USDT",
+                        timestamp=self.timestamp,
+                        signal_name="RSI",
+                        signal_value=tech.rsi_value,
+                        signal_direction="BUY" if tech.rsi_oversold else ("SELL" if tech.rsi_value > 70 else "NEUTRAL"),
+                        confidence=0.7 if tech.rsi_oversold or tech.rsi_value > 70 else 0.5,
+                        timeframe="1d",
+                        parameters=json.dumps({"oversold": tech.rsi_oversold})
+                    )
+                    self.db.insert_technical_signal(rsi_signal)
+
+                    # Store Bollinger signal
+                    bb_signal = TechnicalSignal(
+                        symbol=f"{symbol}USDT",
+                        timestamp=self.timestamp,
+                        signal_name="Bollinger",
+                        signal_value=tech.bb_penetration_pct,
+                        signal_direction="BUY" if tech.bb_touch else "NEUTRAL",
+                        confidence=0.75 if tech.bb_touch else 0.5,
+                        timeframe="1d",
+                        parameters=json.dumps({"touch": tech.bb_touch, "penetration": tech.bb_penetration_pct})
+                    )
+                    self.db.insert_technical_signal(bb_signal)
+
+                    self.results["technical"][symbol] = {
+                        "rsi": tech.rsi_value,
+                        "rsi_oversold": tech.rsi_oversold,
+                        "bb_touch": tech.bb_touch,
+                        "bb_penetration": tech.bb_penetration_pct,
+                        "volume_spike": tech.volume_spike,
+                        "above_200ma": tech.above_200ma,
+                        "score": score,
+                        "direction": direction,
+                        "confidence": confidence
+                    }
+
+                    # Format output
+                    rsi_status = "OVERSOLD" if tech.rsi_oversold else ("OVERBOUGHT" if tech.rsi_value > 70 else "NEUTRAL")
+                    bb_status = f"TOUCH ({tech.bb_penetration_pct:.1f}%)" if tech.bb_touch else "NO TOUCH"
+                    print(f"  {symbol}: RSI={tech.rsi_value:.1f} ({rsi_status}), BB={bb_status}, Score={score} -> {direction}")
+                else:
+                    print(f"  {symbol}: Unable to fetch technical data")
+        except Exception as e:
+            print(f"  [ERROR] Technical analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["technical"]
+
+    def run_portfolio_analysis(self) -> Dict[str, Any]:
+        """Run portfolio optimization analysis."""
+        if not HAS_PORTFOLIO:
+            print("\n[SKIP] Portfolio analysis - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("PORTFOLIO OPTIMIZATION")
+        print("=" * 60)
+
+        try:
+            # Fetch price data
+            print("  Fetching price history...")
+            fetcher = PortfolioDataFetcher()
+            prices = fetcher.fetch_all_prices(days=365)
+
+            if prices.empty or len(prices.columns) < 2:
+                print("  [ERROR] Insufficient price data for optimization")
+                return {}
+
+            # Filter to only our symbols
+            available_symbols = [f"{s}USDT" for s in self.symbols if f"{s}USDT" in prices.columns]
+            if len(available_symbols) < 2:
+                print("  [ERROR] Need at least 2 symbols for portfolio optimization")
+                return {}
+
+            prices = prices[available_symbols]
+            returns = prices.pct_change().dropna()
+
+            # Calculate asset statistics
+            print("  Calculating asset statistics...")
+            stats_calc = AssetStatisticsCalculator(prices)
+
+            asset_stats = {}
+            for symbol in available_symbols:
+                stats = stats_calc.calculate_stats(symbol)
+                if stats:
+                    asset_stats[symbol] = {
+                        "annual_return": stats.annual_return,
+                        "annual_volatility": stats.annual_volatility,
+                        "sharpe_ratio": stats.sharpe_ratio,
+                        "max_drawdown": stats.max_drawdown
+                    }
+
+            # Run optimizations
+            print("  Running portfolio optimizations...")
+            optimizer = PortfolioOptimizer(returns)
+
+            # 1. Equal Weight
+            equal = optimizer.equal_weight()
+            print(f"\n  Equal Weight Portfolio:")
+            for asset, weight in equal.weights.items():
+                print(f"    {asset}: {weight:.1%}")
+            print(f"    Expected Return: {equal.expected_return:.1%}")
+            print(f"    Volatility: {equal.volatility:.1%}")
+            print(f"    Sharpe Ratio: {equal.sharpe_ratio:.2f}")
+
+            # 2. Max Sharpe (Optimal)
+            max_sharpe = optimizer.max_sharpe()
+            print(f"\n  Maximum Sharpe Portfolio (OPTIMAL):")
+            for asset, weight in sorted(max_sharpe.weights.items(), key=lambda x: x[1], reverse=True):
+                if weight > 0.01:
+                    print(f"    {asset}: {weight:.1%}")
+            print(f"    Expected Return: {max_sharpe.expected_return:.1%}")
+            print(f"    Volatility: {max_sharpe.volatility:.1%}")
+            print(f"    Sharpe Ratio: {max_sharpe.sharpe_ratio:.2f}")
+
+            # 3. Minimum Volatility (Safe)
+            min_vol = optimizer.min_volatility()
+            print(f"\n  Minimum Volatility Portfolio (SAFE):")
+            for asset, weight in sorted(min_vol.weights.items(), key=lambda x: x[1], reverse=True):
+                if weight > 0.01:
+                    print(f"    {asset}: {weight:.1%}")
+            print(f"    Expected Return: {min_vol.expected_return:.1%}")
+            print(f"    Volatility: {min_vol.volatility:.1%}")
+            print(f"    Sharpe Ratio: {min_vol.sharpe_ratio:.2f}")
+
+            # Store results
+            self.results["portfolio"] = {
+                "asset_stats": asset_stats,
+                "equal_weight": {
+                    "weights": equal.weights,
+                    "expected_return": equal.expected_return,
+                    "volatility": equal.volatility,
+                    "sharpe": equal.sharpe_ratio
+                },
+                "max_sharpe": {
+                    "weights": max_sharpe.weights,
+                    "expected_return": max_sharpe.expected_return,
+                    "volatility": max_sharpe.volatility,
+                    "sharpe": max_sharpe.sharpe_ratio
+                },
+                "min_volatility": {
+                    "weights": min_vol.weights,
+                    "expected_return": min_vol.expected_return,
+                    "volatility": min_vol.volatility,
+                    "sharpe": min_vol.sharpe_ratio
+                }
+            }
+
+            # Print recommendation
+            print(f"\n  RECOMMENDATION: Use Max Sharpe allocation for best risk-adjusted returns")
+
+        except Exception as e:
+            print(f"  [ERROR] Portfolio analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["portfolio"]
+
     def calculate_aggregated_signals(self) -> Dict[str, Any]:
         """Calculate weighted consensus signals for all symbols."""
         print("\n" + "=" * 60)
@@ -504,7 +723,9 @@ class MasterAnalyzer:
         self.run_whale_analysis()
         self.run_funding_analysis()
         self.run_orderflow_analysis()
+        self.run_technical_analysis()  # RSI, Bollinger, Volume
         self.run_ml_analysis()
+        self.run_portfolio_analysis()  # Optimal allocations
 
         # Calculate aggregated signals
         self.calculate_aggregated_signals()
