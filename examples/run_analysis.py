@@ -2,8 +2,19 @@
 """
 Master Analysis Runner - Connects All Tools to Quant Database
 
-Runs all 6 analysis tools and stores results in the self-learning database.
+Runs all 9 analysis tools and stores results in the self-learning database.
 This creates a unified view of all signals with weighted consensus.
+
+Tools Integrated:
+1. Correlation Analysis - Cross-asset correlation, market regime
+2. Whale Activity - Exchange flows, large transactions
+3. Funding Rate - Perpetual futures sentiment
+4. Order Flow - Orderbook imbalance, bid/ask analysis
+5. Technical Indicators - RSI, Bollinger Bands, Volume
+6. ML Prediction - RandomForest, GradientBoosting
+7. Portfolio Optimizer - Markowitz optimization
+8. Event Detector - News events (SEC, upgrades, airdrops)
+9. Signal Aggregator - Weighted consensus
 
 Usage:
     python examples/run_analysis.py
@@ -99,6 +110,14 @@ try:
 except ImportError as e:
     print(f"[WARN] market_analyzer not available: {e}")
 
+# Event Detector (SEC lawsuits, network upgrades, airdrops)
+HAS_EVENTS = False
+try:
+    from examples.event_detector import EventDetector, EventSummary, HistoricalEventAnalyzer
+    HAS_EVENTS = True
+except ImportError as e:
+    print(f"[WARN] event_detector not available: {e}")
+
 
 class MasterAnalyzer:
     """
@@ -134,6 +153,7 @@ class MasterAnalyzer:
             "ml": {},
             "technical": {},  # RSI, MACD, Bollinger
             "portfolio": {},  # Optimal allocations
+            "events": {},     # News events (SEC, upgrades, airdrops)
             "aggregated": {}
         }
 
@@ -692,6 +712,113 @@ class MasterAnalyzer:
 
         return self.results["portfolio"]
 
+    def run_event_analysis(self) -> Dict[str, Any]:
+        """Run event detector to find price-moving news events."""
+        if not HAS_EVENTS:
+            print("\n[SKIP] Event analysis - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("EVENT DETECTION (News, Legal, Network Events)")
+        print("=" * 60)
+
+        try:
+            detector = EventDetector()
+
+            # Only analyze coins that have event patterns defined
+            # (XRP, SOL, ATOM have specific event patterns)
+            event_coins = ["XRP", "SOL", "ATOM"]
+            coins_to_analyze = [s for s in self.symbols if s in event_coins]
+
+            if not coins_to_analyze:
+                print("  No event-tracked coins in symbol list (XRP, SOL, ATOM)")
+                return {}
+
+            for coin in coins_to_analyze:
+                print(f"  Scanning {coin} for events...")
+                summary = detector.get_summary(coin, days=7)
+
+                if summary:
+                    # Convert recommendation to direction
+                    rec = summary.recommendation
+                    if rec == "STRONG BUY":
+                        direction = "STRONG_BUY"
+                        confidence = 0.85
+                    elif rec == "BUY":
+                        direction = "BUY"
+                        confidence = 0.7
+                    elif rec == "AVOID":
+                        direction = "SELL"
+                        confidence = 0.75
+                    else:
+                        direction = "NEUTRAL"
+                        confidence = 0.5
+
+                    # Store in database as technical signal
+                    signal = TechnicalSignal(
+                        symbol=f"{coin}USDT",
+                        timestamp=self.timestamp,
+                        signal_name="news_events",
+                        signal_value=float(summary.net_weight),
+                        signal_direction=direction,
+                        confidence=confidence,
+                        timeframe="7d",
+                        parameters=json.dumps({
+                            "event_count": len(summary.events),
+                            "dominant_event": summary.dominant_event,
+                            "events": [e.event_type for e in summary.events[:5]]
+                        })
+                    )
+                    self.db.insert_technical_signal(signal)
+
+                    self.results["events"][coin] = {
+                        "net_weight": summary.net_weight,
+                        "event_count": len(summary.events),
+                        "dominant_event": summary.dominant_event,
+                        "recommendation": rec,
+                        "direction": direction,
+                        "confidence": confidence,
+                        "events": [
+                            {
+                                "type": e.event_type,
+                                "headline": e.headline[:50],
+                                "weight": e.weight,
+                                "impact": e.impact_estimate
+                            }
+                            for e in summary.events[:5]
+                        ]
+                    }
+
+                    # Print results
+                    event_emoji = "+" if summary.net_weight > 0 else "-" if summary.net_weight < 0 else "="
+                    print(f"    Weight: {event_emoji}{abs(summary.net_weight)} -> {direction}")
+                    print(f"    Events found: {len(summary.events)}")
+                    if summary.dominant_event:
+                        print(f"    Dominant: {summary.dominant_event}")
+
+                    # Show top events
+                    for e in summary.events[:3]:
+                        emoji = "+" if e.weight > 0 else "-"
+                        print(f"      {emoji} [{e.event_type}] {e.headline[:40]}...")
+
+            # Also show historical patterns for context
+            if coins_to_analyze:
+                print("\n  Historical Event Impact Reference:")
+                hist = HistoricalEventAnalyzer()
+                for coin in coins_to_analyze:
+                    patterns = hist.get_event_patterns(coin)
+                    if patterns:
+                        print(f"    {coin}: {patterns['total_events']} known events, "
+                              f"avg positive: +{patterns['avg_positive_impact']:.0f}%, "
+                              f"avg negative: {patterns['avg_negative_impact']:.0f}%")
+
+        except Exception as e:
+            print(f"  [ERROR] Event analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["events"]
+
     def calculate_aggregated_signals(self) -> Dict[str, Any]:
         """Calculate weighted consensus signals for all symbols."""
         print("\n" + "=" * 60)
@@ -726,6 +853,7 @@ class MasterAnalyzer:
         self.run_technical_analysis()  # RSI, Bollinger, Volume
         self.run_ml_analysis()
         self.run_portfolio_analysis()  # Optimal allocations
+        self.run_event_analysis()      # News events (SEC, upgrades, airdrops)
 
         # Calculate aggregated signals
         self.calculate_aggregated_signals()
