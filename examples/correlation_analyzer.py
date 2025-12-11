@@ -194,7 +194,7 @@ class MultiAssetDataFetcher:
         return pd.DataFrame()
 
     def _fetch_coingecko(self, symbol: str, days: int) -> pd.DataFrame:
-        """Fetch from CoinGecko."""
+        """Fetch from CoinGecko market_chart endpoint."""
         coingecko_ids = {
             "BTCUSDT": "bitcoin",
             "ETHUSDT": "ethereum",
@@ -205,7 +205,7 @@ class MultiAssetDataFetcher:
             "DOTUSDT": "polkadot",
             "AVAXUSDT": "avalanche-2",
             "LINKUSDT": "chainlink",
-            "MATICUSDT": "matic-network",
+            "MATICUSDT": "polygon-ecosystem-token",
         }
 
         coin_id = coingecko_ids.get(symbol)
@@ -213,15 +213,20 @@ class MultiAssetDataFetcher:
             return pd.DataFrame()
 
         try:
-            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-            params = {"vs_currency": "usd", "days": min(days, 365)}
+            # Use market_chart endpoint which is more reliable
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+            params = {"vs_currency": "usd", "days": min(days, 365), "interval": "daily"}
 
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
 
-            if isinstance(data, list) and len(data) > 0:
-                df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close"])
+            if "prices" in data and len(data["prices"]) > 0:
+                prices = data["prices"]
+                df = pd.DataFrame(prices, columns=["timestamp", "close"])
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df["open"] = df["close"]
+                df["high"] = df["close"]
+                df["low"] = df["close"]
                 df["volume"] = 0.0
 
                 return df[["timestamp", "open", "high", "low", "close", "volume"]]
