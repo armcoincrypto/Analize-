@@ -415,9 +415,12 @@ class MasterAnalyzer:
             generator = MLSignalGenerator()
 
             for symbol in self.symbols:
+                # API needs full symbol with USDT suffix
+                full_symbol = f"{symbol}USDT"
+
                 # CRITICAL: Must train models before generating signals
                 print(f"  {symbol}: Training ML models (365 days)...")
-                performance = generator.train_models(symbol, lookback_days=365, prediction_horizon=5)
+                performance = generator.train_models(full_symbol, lookback_days=365, prediction_horizon=5)
 
                 if not performance:
                     print(f"  {symbol}: Unable to train models (insufficient data)")
@@ -428,7 +431,7 @@ class MasterAnalyzer:
                     print(f"    {model_name}: accuracy={perf.accuracy:.1%}")
 
                 # Now generate signal with trained models
-                result = generator.generate_signal(symbol)
+                result = generator.generate_signal(full_symbol)
 
                 if result:
                     # MLSignal has: .prediction (BUY/SELL/HOLD), .confidence,
