@@ -452,7 +452,7 @@ class MasterAnalyzer:
                             {"features_used": result.features_used}
                         ),
                         model_version="1.0",
-                        validation_score=performance.get("ensemble", performance.get("random_forest")).accuracy if performance else None
+                        validation_score=list(performance.values())[0].accuracy if performance else None
                     )
                     self.db.insert_ml_prediction(pred)
 
