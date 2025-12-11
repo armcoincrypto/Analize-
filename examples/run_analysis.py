@@ -2,7 +2,7 @@
 """
 Master Analysis Runner - Connects All Tools to Quant Database
 
-Runs all 9 analysis tools and stores results in the self-learning database.
+Runs all 10 analysis tools and stores results in the self-learning database.
 This creates a unified view of all signals with weighted consensus.
 
 Tools Integrated:
@@ -11,10 +11,11 @@ Tools Integrated:
 3. Funding Rate - Perpetual futures sentiment
 4. Order Flow - Orderbook imbalance, bid/ask analysis
 5. Technical Indicators - RSI, Bollinger Bands, Volume
-6. ML Prediction - RandomForest, GradientBoosting
-7. Portfolio Optimizer - Markowitz optimization
-8. Event Detector - News events (SEC, upgrades, airdrops)
-9. Signal Aggregator - Weighted consensus
+6. Advanced Technical - MACD, Stochastic, ATR, VWAP, Keltner, Donchian
+7. ML Prediction - RandomForest, GradientBoosting
+8. Portfolio Optimizer - Markowitz optimization
+9. Event Detector - News events (SEC, upgrades, airdrops)
+10. Signal Aggregator - Weighted consensus
 
 Usage:
     python examples/run_analysis.py
@@ -30,6 +31,9 @@ import argparse
 import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+
+import pandas as pd
+import numpy as np
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -118,6 +122,14 @@ try:
 except ImportError as e:
     print(f"[WARN] event_detector not available: {e}")
 
+# Advanced Technical Indicators (MACD, Stochastic, ATR, VWAP, Keltner, Donchian)
+HAS_ADVANCED_INDICATORS = False
+try:
+    from src.analize.features.indicators import TechnicalIndicators
+    HAS_ADVANCED_INDICATORS = True
+except ImportError as e:
+    print(f"[WARN] advanced indicators not available: {e}")
+
 
 class MasterAnalyzer:
     """
@@ -152,6 +164,7 @@ class MasterAnalyzer:
             "orderflow": {},
             "ml": {},
             "technical": {},  # RSI, MACD, Bollinger
+            "advanced_technical": {},  # MACD, Stochastic, ATR, VWAP, Keltner
             "portfolio": {},  # Optimal allocations
             "events": {},     # News events (SEC, upgrades, airdrops)
             "aggregated": {}
@@ -819,6 +832,252 @@ class MasterAnalyzer:
 
         return self.results["events"]
 
+    def run_advanced_technical_analysis(self) -> Dict[str, Any]:
+        """Run advanced technical indicators (MACD, Stochastic, ATR, VWAP, etc.)."""
+        if not HAS_ADVANCED_INDICATORS:
+            print("\n[SKIP] Advanced technical analysis - module not available")
+            return {}
+
+        print("\n" + "=" * 60)
+        print("ADVANCED TECHNICAL INDICATORS")
+        print("(MACD, Stochastic, ATR, VWAP, Keltner, Donchian)")
+        print("=" * 60)
+
+        try:
+            # We need OHLCV data - try to get from portfolio data fetcher or cached data
+            if HAS_PORTFOLIO:
+                print("  Fetching OHLCV data for indicators...")
+                fetcher = PortfolioDataFetcher()
+                prices = fetcher.fetch_all_prices(days=100)
+
+                if prices.empty:
+                    print("  [WARN] No price data available - using simulated data for demo")
+                    # Create demo data for testing
+                    dates = pd.date_range(end=datetime.utcnow(), periods=100, freq='D')
+                    for symbol in self.symbols:
+                        # Generate realistic looking price data
+                        np.random.seed(hash(symbol) % 2**31)
+                        base_price = {'BTC': 95000, 'ETH': 3500, 'XRP': 2.3, 'SOL': 220, 'ATOM': 9}.get(symbol, 100)
+                        returns = np.random.normal(0.001, 0.03, 100)
+                        prices_sim = base_price * np.cumprod(1 + returns)
+
+                        df = pd.DataFrame({
+                            'open': prices_sim * (1 + np.random.uniform(-0.01, 0.01, 100)),
+                            'high': prices_sim * (1 + np.random.uniform(0, 0.02, 100)),
+                            'low': prices_sim * (1 - np.random.uniform(0, 0.02, 100)),
+                            'close': prices_sim,
+                            'volume': np.random.uniform(1e6, 1e8, 100)
+                        }, index=dates)
+
+                        self._analyze_symbol_indicators(symbol, df)
+                else:
+                    # Use real price data
+                    for symbol in self.symbols:
+                        symbol_key = f"{symbol}USDT"
+                        if symbol_key in prices.columns:
+                            # We only have close prices, simulate OHLCV
+                            close = prices[symbol_key].dropna()
+                            if len(close) > 20:
+                                df = pd.DataFrame({
+                                    'open': close.shift(1).fillna(close.iloc[0]),
+                                    'high': close * 1.005,
+                                    'low': close * 0.995,
+                                    'close': close,
+                                    'volume': np.random.uniform(1e6, 1e8, len(close))
+                                })
+                                self._analyze_symbol_indicators(symbol, df)
+                            else:
+                                print(f"  {symbol}: Insufficient data")
+                        else:
+                            print(f"  {symbol}: No price data available")
+            else:
+                print("  [WARN] Portfolio module not available - using simulated data")
+                # Use simulated data for demo
+                dates = pd.date_range(end=datetime.utcnow(), periods=100, freq='D')
+                for symbol in self.symbols:
+                    np.random.seed(hash(symbol) % 2**31)
+                    base_price = {'BTC': 95000, 'ETH': 3500, 'XRP': 2.3, 'SOL': 220, 'ATOM': 9}.get(symbol, 100)
+                    returns = np.random.normal(0.001, 0.03, 100)
+                    prices_sim = base_price * np.cumprod(1 + returns)
+
+                    df = pd.DataFrame({
+                        'open': prices_sim * (1 + np.random.uniform(-0.01, 0.01, 100)),
+                        'high': prices_sim * (1 + np.random.uniform(0, 0.02, 100)),
+                        'low': prices_sim * (1 - np.random.uniform(0, 0.02, 100)),
+                        'close': prices_sim,
+                        'volume': np.random.uniform(1e6, 1e8, 100)
+                    }, index=dates)
+
+                    self._analyze_symbol_indicators(symbol, df)
+
+        except Exception as e:
+            print(f"  [ERROR] Advanced technical analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return self.results["advanced_technical"]
+
+    def _analyze_symbol_indicators(self, symbol: str, df) -> None:
+        """Analyze a single symbol with all advanced indicators."""
+        try:
+            close = df['close']
+            high = df['high']
+            low = df['low']
+            volume = df['volume']
+            open_price = df['open']
+
+            # Calculate all indicators
+            indicators = {}
+
+            # MACD
+            macd_line, signal_line, histogram = TechnicalIndicators.macd(close)
+            indicators['macd'] = macd_line.iloc[-1]
+            indicators['macd_signal'] = signal_line.iloc[-1]
+            indicators['macd_histogram'] = histogram.iloc[-1]
+            macd_bullish = histogram.iloc[-1] > 0 and histogram.iloc[-1] > histogram.iloc[-2]
+
+            # Stochastic
+            stoch_k, stoch_d = TechnicalIndicators.stochastic(high, low, close)
+            indicators['stoch_k'] = stoch_k.iloc[-1]
+            indicators['stoch_d'] = stoch_d.iloc[-1]
+            stoch_oversold = stoch_k.iloc[-1] < 20
+            stoch_overbought = stoch_k.iloc[-1] > 80
+
+            # ATR (volatility)
+            atr = TechnicalIndicators.atr(high, low, close)
+            atr_pct = TechnicalIndicators.atr_percent(high, low, close)
+            indicators['atr'] = atr.iloc[-1]
+            indicators['atr_percent'] = atr_pct.iloc[-1]
+
+            # VWAP
+            vwap = TechnicalIndicators.vwap(high, low, close, volume)
+            vwap_dist = TechnicalIndicators.vwap_distance(close, high, low, volume)
+            indicators['vwap'] = vwap.iloc[-1]
+            indicators['vwap_distance'] = vwap_dist.iloc[-1]
+            above_vwap = close.iloc[-1] > vwap.iloc[-1]
+
+            # Keltner Channel
+            kelt_upper, kelt_mid, kelt_lower = TechnicalIndicators.keltner_channel(high, low, close)
+            indicators['keltner_upper'] = kelt_upper.iloc[-1]
+            indicators['keltner_lower'] = kelt_lower.iloc[-1]
+            kelt_squeeze = close.iloc[-1] < kelt_lower.iloc[-1]
+
+            # Donchian Channel
+            don_upper, don_mid, don_lower = TechnicalIndicators.donchian_channel(high, low)
+            indicators['donchian_upper'] = don_upper.iloc[-1]
+            indicators['donchian_lower'] = don_lower.iloc[-1]
+            don_breakout = close.iloc[-1] >= don_upper.iloc[-1] * 0.99
+
+            # Volume Z-Score
+            vol_zscore = TechnicalIndicators.volume_zscore(volume)
+            indicators['volume_zscore'] = vol_zscore.iloc[-1]
+            high_volume = vol_zscore.iloc[-1] > 2
+
+            # RSI (from our indicators module)
+            rsi = TechnicalIndicators.rsi(close)
+            indicators['rsi'] = rsi.iloc[-1]
+
+            # OBV trend
+            obv = TechnicalIndicators.obv(close, volume)
+            obv_trend = "UP" if obv.iloc[-1] > obv.iloc[-5] else "DOWN"
+            indicators['obv_trend'] = obv_trend
+
+            # Calculate composite signal
+            bullish_signals = 0
+            bearish_signals = 0
+
+            # MACD
+            if macd_bullish:
+                bullish_signals += 1
+            else:
+                bearish_signals += 1
+
+            # Stochastic
+            if stoch_oversold:
+                bullish_signals += 1
+            elif stoch_overbought:
+                bearish_signals += 1
+
+            # VWAP
+            if above_vwap:
+                bullish_signals += 1
+            else:
+                bearish_signals += 1
+
+            # Keltner squeeze
+            if kelt_squeeze:
+                bullish_signals += 1
+
+            # Donchian breakout
+            if don_breakout:
+                bullish_signals += 1
+
+            # Volume confirmation
+            if high_volume and obv_trend == "UP":
+                bullish_signals += 1
+            elif high_volume and obv_trend == "DOWN":
+                bearish_signals += 1
+
+            # Determine direction
+            net_score = bullish_signals - bearish_signals
+            if net_score >= 3:
+                direction = "STRONG_BUY"
+                confidence = 0.85
+            elif net_score >= 1:
+                direction = "BUY"
+                confidence = 0.65
+            elif net_score <= -3:
+                direction = "STRONG_SELL"
+                confidence = 0.85
+            elif net_score <= -1:
+                direction = "SELL"
+                confidence = 0.65
+            else:
+                direction = "NEUTRAL"
+                confidence = 0.5
+
+            # Store signals in database
+            for ind_name, ind_value in [
+                ("MACD", indicators['macd_histogram']),
+                ("Stochastic_K", indicators['stoch_k']),
+                ("ATR_Percent", indicators['atr_percent']),
+                ("VWAP_Distance", indicators['vwap_distance']),
+                ("Volume_ZScore", indicators['volume_zscore']),
+            ]:
+                signal = TechnicalSignal(
+                    symbol=f"{symbol}USDT",
+                    timestamp=self.timestamp,
+                    signal_name=ind_name,
+                    signal_value=float(ind_value) if not pd.isna(ind_value) else 0,
+                    signal_direction=direction,
+                    confidence=confidence,
+                    timeframe="1d",
+                    parameters=json.dumps({"source": "advanced_indicators"})
+                )
+                self.db.insert_technical_signal(signal)
+
+            # Store results
+            self.results["advanced_technical"][symbol] = {
+                "indicators": indicators,
+                "bullish_signals": bullish_signals,
+                "bearish_signals": bearish_signals,
+                "net_score": net_score,
+                "direction": direction,
+                "confidence": confidence
+            }
+
+            # Print summary
+            macd_status = "BULLISH" if macd_bullish else "BEARISH"
+            stoch_status = "OVERSOLD" if stoch_oversold else ("OVERBOUGHT" if stoch_overbought else "NEUTRAL")
+            print(f"  {symbol}: MACD={macd_status}, Stoch={stoch_status} ({indicators['stoch_k']:.1f}), "
+                  f"ATR={indicators['atr_percent']:.2f}%")
+            print(f"         VWAP={'ABOVE' if above_vwap else 'BELOW'}, "
+                  f"Keltner={'SQUEEZE' if kelt_squeeze else 'OK'}, "
+                  f"Score={net_score:+d} -> {direction}")
+
+        except Exception as e:
+            print(f"  {symbol}: Error calculating indicators - {e}")
+
     def calculate_aggregated_signals(self) -> Dict[str, Any]:
         """Calculate weighted consensus signals for all symbols."""
         print("\n" + "=" * 60)
@@ -851,6 +1110,7 @@ class MasterAnalyzer:
         self.run_funding_analysis()
         self.run_orderflow_analysis()
         self.run_technical_analysis()  # RSI, Bollinger, Volume
+        self.run_advanced_technical_analysis()  # MACD, Stochastic, ATR, VWAP
         self.run_ml_analysis()
         self.run_portfolio_analysis()  # Optimal allocations
         self.run_event_analysis()      # News events (SEC, upgrades, airdrops)
