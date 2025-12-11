@@ -146,7 +146,7 @@ class FundingRateFetcher:
                         annualized_rate=rate * 3 * 365
                     )
         except Exception as e:
-            pass
+            print(f"  [DEBUG] Bybit funding fetch error for {symbol}: {e}")
 
         return None
 
@@ -182,7 +182,7 @@ class FundingRateFetcher:
                         annualized_rate=rate * 3 * 365
                     )
         except Exception as e:
-            pass
+            print(f"  [DEBUG] OKX funding fetch error for {symbol}: {e}")
 
         return None
 

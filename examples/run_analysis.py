@@ -289,7 +289,8 @@ class MasterAnalyzer:
             analyzer = FundingRateAnalyzer()
 
             for symbol in self.symbols:
-                result = analyzer.analyze_symbol(symbol)
+                # API needs full symbol with USDT suffix
+                result = analyzer.analyze_symbol(f"{symbol}USDT")
 
                 if result and result.current_rate is not None:
                     rate = result.current_rate
@@ -414,6 +415,19 @@ class MasterAnalyzer:
             generator = MLSignalGenerator()
 
             for symbol in self.symbols:
+                # CRITICAL: Must train models before generating signals
+                print(f"  {symbol}: Training ML models (365 days)...")
+                performance = generator.train_models(symbol, lookback_days=365, prediction_horizon=5)
+
+                if not performance:
+                    print(f"  {symbol}: Unable to train models (insufficient data)")
+                    continue
+
+                # Show model performance
+                for model_name, perf in performance.items():
+                    print(f"    {model_name}: accuracy={perf.accuracy:.1%}")
+
+                # Now generate signal with trained models
                 result = generator.generate_signal(symbol)
 
                 if result:
@@ -435,7 +449,7 @@ class MasterAnalyzer:
                             {"features_used": result.features_used}
                         ),
                         model_version="1.0",
-                        validation_score=None
+                        validation_score=performance.get("ensemble", performance.get("random_forest")).accuracy if performance else None
                     )
                     self.db.insert_ml_prediction(pred)
 
