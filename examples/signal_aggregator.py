@@ -134,11 +134,25 @@ class SignalAuditTable:
 
     def __init__(self, db_path: str = "signal_audit.db"):
         self.db_path = db_path
+        self._conn = None  # Persistent connection for :memory: databases
         self._init_db()
+
+    def _get_connection(self):
+        """Get database connection (persistent for :memory:)."""
+        if self.db_path == ":memory:":
+            if self._conn is None:
+                self._conn = sqlite3.connect(":memory:")
+            return self._conn
+        return sqlite3.connect(self.db_path)
+
+    def _close_connection(self, conn):
+        """Close connection (skip for :memory:)."""
+        if self.db_path != ":memory:":
+            conn.close()
 
     def _init_db(self):
         """Initialize database schema."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -175,11 +189,11 @@ class SignalAuditTable:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON signals(timestamp)")
 
         conn.commit()
-        conn.close()
+        self._close_connection(conn)
 
     def record_signal(self, record: SignalAuditRecord):
         """Record a new signal."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -205,11 +219,11 @@ class SignalAuditTable:
         ))
 
         conn.commit()
-        conn.close()
+        self._close_connection(conn)
 
     def update_outcomes(self, signal_id: str, outcomes: Dict):
         """Update signal outcomes after time passes."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         updates = []
@@ -231,13 +245,13 @@ class SignalAuditTable:
             """, values)
 
         conn.commit()
-        conn.close()
+        self._close_connection(conn)
 
     def get_precision_metrics(self, signal_source: Optional[str] = None,
                               symbol: Optional[str] = None,
                               days_back: int = 90) -> Dict:
         """Calculate precision metrics for signals."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
 
         query = """
             SELECT
@@ -267,7 +281,7 @@ class SignalAuditTable:
         query += " GROUP BY signal_source, signal_type"
 
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        self._close_connection(conn)
 
         metrics = {}
         for _, row in df.iterrows():
