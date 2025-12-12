@@ -48,8 +48,16 @@ Usage:
 Author: Cloud AI Analyzer
 """
 
-import sys
+# SSL bypass for networks with SSL interception (VPN, corporate proxies)
+# This MUST be imported before any other network imports
 import os
+if os.environ.get('DISABLE_SSL_VERIFY', '1') == '1':
+    try:
+        import ssl_bypass
+    except ImportError:
+        pass
+
+import sys
 import argparse
 import json
 from datetime import datetime, timedelta
