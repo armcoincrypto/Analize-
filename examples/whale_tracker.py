@@ -541,11 +541,20 @@ class WhaleActivityCorrelator:
                 "limit": 1000
             }
 
+            # Try Binance US first (works in geo-restricted regions)
             response = requests.get(
-                "https://api.binance.com/api/v3/klines",
+                "https://api.binance.us/api/v3/klines",
                 params=params,
                 timeout=15
             )
+
+            # Fallback to Binance Global if US fails
+            if response.status_code != 200:
+                response = requests.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params=params,
+                    timeout=15
+                )
 
             if response.status_code == 200:
                 data = response.json()

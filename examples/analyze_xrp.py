@@ -21,10 +21,10 @@ def fetch_xrp_data(days: int = 30, interval: str = "1h") -> pd.DataFrame:
     Returns:
         DataFrame with OHLCV data
     """
-    # Try Binance first, then Binance US, then a backup
+    # Try Binance US first (works in geo-restricted regions), then Binance
     urls = [
-        "https://api.binance.com/api/v3/klines",
         "https://api.binance.us/api/v3/klines",
+        "https://api.binance.com/api/v3/klines",
     ]
 
     end_time = int(datetime.now().timestamp() * 1000)

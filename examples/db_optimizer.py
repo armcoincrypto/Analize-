@@ -89,8 +89,8 @@ def init_database():
 def fetch_and_store_data(symbol: str = "XRPUSDT", days: int = 90, interval: str = "1h"):
     """Fetch data from Binance and store in database."""
     urls = [
+        "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
         "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
     ]
 
     end_time = int(datetime.now().timestamp() * 1000)

@@ -32,8 +32,8 @@ class StrategyResult:
 def fetch_data(symbol: str = "XRPUSDT", days: int = 30, interval: str = "1h") -> pd.DataFrame:
     """Fetch OHLCV data from Binance."""
     urls = [
+        "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
         "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
     ]
 
     end_time = int(datetime.now().timestamp() * 1000)

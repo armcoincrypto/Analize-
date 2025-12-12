@@ -186,7 +186,7 @@ class PriceDataFetcher:
 
     ENDPOINTS = [
         "https://api.bybit.com/v5/market/kline",
-        "https://api.binance.com/api/v3/klines",
+        "https://api.binance.us/api/v3/klines",  # US first (geo-restricted regions)
     ]
 
     def __init__(self):
@@ -198,10 +198,10 @@ class PriceDataFetcher:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        # Try multiple sources
-        df = self._fetch_binance(symbol, days)
+        # Try multiple sources (US first for geo-restricted regions)
+        df = self._fetch_binance_us(symbol, days)
         if df.empty:
-            df = self._fetch_binance_us(symbol, days)
+            df = self._fetch_binance(symbol, days)
         if df.empty:
             df = self._fetch_coingecko(symbol, days)
         if df.empty:

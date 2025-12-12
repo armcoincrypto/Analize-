@@ -15,8 +15,8 @@ from analize.features.indicators import TechnicalIndicators
 def fetch_daily_data(symbol: str = "XRPUSDT", days: int = 365) -> pd.DataFrame:
     """Fetch daily candles."""
     urls = [
+        "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
         "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
     ]
 
     params = {

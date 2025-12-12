@@ -101,8 +101,8 @@ class Trade:
 def fetch_data(symbol: str, days: int = 365) -> pd.DataFrame:
     """Fetch daily data from Binance."""
     urls = [
+        "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
         "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
     ]
 
     params = {

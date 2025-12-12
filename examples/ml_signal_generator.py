@@ -92,9 +92,10 @@ class MLDataFetcher:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        df = self._fetch_binance(symbol, days)
+        # Try Binance US first (works in geo-restricted regions)
+        df = self._fetch_binance_us(symbol, days)
         if df.empty:
-            df = self._fetch_binance_us(symbol, days)
+            df = self._fetch_binance(symbol, days)
 
         if not df.empty:
             self.cache[cache_key] = df

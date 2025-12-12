@@ -96,8 +96,8 @@ def init_database():
 def fetch_data(symbol: str = "XRPUSDT", days: int = 90, interval: str = "1h") -> int:
     """Fetch historical data from Binance."""
     urls = [
+        "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
         "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
     ]
 
     conn = sqlite3.connect(DB_PATH)

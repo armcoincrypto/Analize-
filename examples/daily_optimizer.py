@@ -42,8 +42,8 @@ def init_db():
 def fetch_daily_data(symbol: str = "XRPUSDT", days: int = 365) -> pd.DataFrame:
     """Fetch daily candles - up to 1 year of data."""
     urls = [
+        "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
         "https://api.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines",
     ]
 
     end_time = int(datetime.now().timestamp() * 1000)

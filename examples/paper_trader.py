@@ -120,8 +120,8 @@ class PaperTrader:
     def fetch_recent_candles(self, limit: int = 100) -> pd.DataFrame:
         """Fetch recent candles for indicator calculation."""
         urls = [
+            "https://api.binance.us/api/v3/klines",  # US first (works in geo-restricted regions)
             "https://api.binance.com/api/v3/klines",
-            "https://api.binance.us/api/v3/klines",
         ]
 
         params = {
