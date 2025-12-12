@@ -371,10 +371,13 @@ class PaperTrader:
               f"Win Rate: {stats.get('win_rate', 0):.1f}%")
 
 
-def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60):
+def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60,
+                      buy_threshold: int = 20, sell_threshold: int = 75):
     """Run paper trading simulation."""
     print("=" * 70)
     print("PAPER TRADING SIMULATOR")
+    if buy_threshold != 20 or sell_threshold != 75:
+        print("⚠️  DEMO MODE - Using tight thresholds for testing")
     print("=" * 70)
 
     trader = PaperTrader(
@@ -384,8 +387,8 @@ def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60):
         strategy_params={
             "k_period": 21,
             "d_period": 3,
-            "buy_threshold": 20,
-            "sell_threshold": 75,
+            "buy_threshold": buy_threshold,
+            "sell_threshold": sell_threshold,
         }
     )
 
@@ -500,9 +503,10 @@ def main():
     print("2. Short session (30 minutes, 1m intervals)")
     print("3. Full session (4 hours, 5m intervals)")
     print("4. Custom")
+    print("5. DEMO MODE (tight thresholds for testing)")
 
     try:
-        choice = input("\nSelect option (1-4): ").strip()
+        choice = input("\nSelect option (1-5): ").strip()
     except:
         choice = "1"
 
@@ -512,6 +516,14 @@ def main():
         run_paper_trading(duration_minutes=30, check_interval=60)
     elif choice == "3":
         run_paper_trading(duration_minutes=240, check_interval=300)
+    elif choice == "5":
+        # Demo mode with tight thresholds to generate trades
+        run_paper_trading(
+            duration_minutes=5,
+            check_interval=30,
+            buy_threshold=40,    # Normal: 20
+            sell_threshold=60    # Normal: 75
+        )
     else:
         try:
             mins = int(input("Duration (minutes): "))
