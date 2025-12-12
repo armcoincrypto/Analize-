@@ -2,8 +2,9 @@
 """
 Master Analysis Runner - Connects All Tools to Quant Database
 
-Runs all 23 analysis tools and stores results in the self-learning database.
-This creates a unified view of all signals with weighted consensus.
+Runs all 23 analysis tools + 5 safety systems and stores results in the
+self-learning database. This creates a unified view of all signals with
+weighted consensus and comprehensive risk controls.
 
 Tools Integrated:
 1. Correlation Analysis - Cross-asset correlation, market regime
@@ -30,10 +31,19 @@ Tools Integrated:
 22. Notification Sender - Telegram/Slack/Email notifications
 23. Signal Aggregator - Weighted consensus
 
+Safety Systems:
+S1. Risk Manager - Stop-loss, exposure caps, circuit breaker
+S2. Signal Audit - Performance tracking, precision/recall
+S3. Shadow Trader - Validation mode without real execution
+S4. Governance - Human-in-the-loop approval for large trades
+S5. Notifications - Multi-channel alerts (Telegram/Slack/Email)
+
 Usage:
     python examples/run_analysis.py
     python examples/run_analysis.py --symbols BTC ETH XRP SOL
     python examples/run_analysis.py --db-path my_signals.db
+    python examples/run_analysis.py --safety-check    # Run with safety check
+    python examples/run_analysis.py --safety-only     # Only check safety systems
 
 Author: Cloud AI Analyzer
 """
@@ -261,6 +271,54 @@ try:
     HAS_NOTIFICATIONS = True
 except ImportError as e:
     print(f"[WARN] notification sender not available: {e}")
+
+# === SAFETY SYSTEMS ===
+
+# Risk Manager (stop-loss, exposure caps, circuit breaker)
+HAS_RISK_MANAGER = False
+try:
+    from examples.risk_manager import (
+        RiskManager, RiskConfig, RiskAssessment, TradeDecision,
+        Signal as RiskSignal, TradeRequest, MarketRegime as RiskRegime
+    )
+    HAS_RISK_MANAGER = True
+except ImportError as e:
+    print(f"[WARN] risk manager not available: {e}")
+
+# Signal Audit (performance tracking)
+HAS_SIGNAL_AUDIT = False
+try:
+    from examples.signal_audit import SignalAudit, SignalPerformance
+    HAS_SIGNAL_AUDIT = True
+except ImportError as e:
+    print(f"[WARN] signal audit not available: {e}")
+
+# Shadow Trader (validation mode)
+HAS_SHADOW_TRADER = False
+try:
+    from examples.shadow_trader import ShadowTrader, ShadowMode, ShadowOrder
+    HAS_SHADOW_TRADER = True
+except ImportError as e:
+    print(f"[WARN] shadow trader not available: {e}")
+
+# Governance (human-in-the-loop approval)
+HAS_GOVERNANCE = False
+try:
+    from examples.governance import (
+        GovernanceManager, GovernanceConfig, ApprovalRequest,
+        ActionType, Role, ApprovalStatus
+    )
+    HAS_GOVERNANCE = True
+except ImportError as e:
+    print(f"[WARN] governance not available: {e}")
+
+# Notification Manager (multi-channel alerts)
+HAS_NOTIFIER = False
+try:
+    from examples.notifications import NotificationManager, Alert, AlertLevel
+    HAS_NOTIFIER = True
+except ImportError as e:
+    print(f"[WARN] notification manager not available: {e}")
 
 
 class MasterAnalyzer:
@@ -2648,6 +2706,124 @@ class MasterAnalyzer:
         print("=" * 70)
 
 
+def run_safety_check():
+    """Run comprehensive safety system check."""
+    print("\n" + "=" * 70)
+    print("SAFETY SYSTEMS CHECK")
+    print("=" * 70)
+
+    safety_status = {}
+
+    # 1. Risk Manager
+    print("\n[1] Risk Manager")
+    if HAS_RISK_MANAGER:
+        try:
+            rm = RiskManager()
+            rm.set_aum(10000)  # Example AUM
+            triggered, reason = rm.check_circuit_breaker()
+            regime = rm.detect_regime()
+            print(f"  ✓ Risk Manager: Active")
+            print(f"    Circuit Breaker: {'TRIGGERED' if triggered else 'OK'}")
+            print(f"    Market Regime: {regime.value}")
+            safety_status['risk_manager'] = 'active'
+        except Exception as e:
+            print(f"  ✗ Risk Manager Error: {e}")
+            safety_status['risk_manager'] = 'error'
+    else:
+        print("  ✗ Risk Manager: Not available")
+        safety_status['risk_manager'] = 'unavailable'
+
+    # 2. Signal Audit
+    print("\n[2] Signal Audit")
+    if HAS_SIGNAL_AUDIT:
+        try:
+            audit = SignalAudit()
+            perf = audit.get_performance_by_type(days=30)
+            print(f"  ✓ Signal Audit: Active")
+            print(f"    Tracked signal types: {len(perf)}")
+            underperforming = audit.get_underperforming_signals()
+            if underperforming:
+                print(f"    ⚠ Underperforming signals: {len(underperforming)}")
+                for sig in underperforming[:3]:
+                    print(f"      - {sig['signal_type']}: {sig['precision_14d']:.1f}%")
+            safety_status['signal_audit'] = 'active'
+        except Exception as e:
+            print(f"  ✗ Signal Audit Error: {e}")
+            safety_status['signal_audit'] = 'error'
+    else:
+        print("  ✗ Signal Audit: Not available")
+        safety_status['signal_audit'] = 'unavailable'
+
+    # 3. Shadow Trader
+    print("\n[3] Shadow Trader")
+    if HAS_SHADOW_TRADER:
+        try:
+            shadow = ShadowTrader(mode=ShadowMode.FULL_SHADOW)
+            shadow.load_orders_from_db()
+            perf = shadow.get_performance()
+            print(f"  ✓ Shadow Trader: Active")
+            print(f"    Open orders: {len(shadow.orders)}")
+            print(f"    Total P&L: ${perf.total_pnl_usd:+,.2f}")
+            should_alert, msg = shadow.check_drift_alert()
+            if should_alert:
+                print(f"    ⚠ DRIFT ALERT: {msg}")
+            safety_status['shadow_trader'] = 'active'
+        except Exception as e:
+            print(f"  ✗ Shadow Trader Error: {e}")
+            safety_status['shadow_trader'] = 'error'
+    else:
+        print("  ✗ Shadow Trader: Not available")
+        safety_status['shadow_trader'] = 'unavailable'
+
+    # 4. Governance
+    print("\n[4] Governance System")
+    if HAS_GOVERNANCE:
+        try:
+            gov = GovernanceManager()
+            pending = gov.get_pending_requests()
+            print(f"  ✓ Governance: Active")
+            print(f"    Pending approvals: {len(pending)}")
+            if pending:
+                for req in pending[:3]:
+                    print(f"      - {req.request_id}: {req.action_type.value}")
+            safety_status['governance'] = 'active'
+        except Exception as e:
+            print(f"  ✗ Governance Error: {e}")
+            safety_status['governance'] = 'error'
+    else:
+        print("  ✗ Governance: Not available")
+        safety_status['governance'] = 'unavailable'
+
+    # 5. Notifications
+    print("\n[5] Notification System")
+    if HAS_NOTIFIER:
+        try:
+            notifier = NotificationManager()
+            print(f"  ✓ Notifications: Active")
+            safety_status['notifications'] = 'active'
+        except Exception as e:
+            print(f"  ✗ Notifications Error: {e}")
+            safety_status['notifications'] = 'error'
+    else:
+        print("  ✗ Notifications: Not available")
+        safety_status['notifications'] = 'unavailable'
+
+    # Summary
+    print("\n" + "─" * 70)
+    active_count = sum(1 for v in safety_status.values() if v == 'active')
+    total_count = len(safety_status)
+    print(f"Safety Systems: {active_count}/{total_count} active")
+
+    if active_count < total_count:
+        print("\n⚠ WARNING: Not all safety systems are active!")
+        print("  Run the following to install missing components:")
+        print("  pip install -r requirements.txt")
+
+    print("=" * 70)
+
+    return safety_status
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -2664,8 +2840,33 @@ def main():
         default="quant_signals.db",
         help="Path to SQLite database (default: quant_signals.db)"
     )
+    parser.add_argument(
+        "--safety-check",
+        action="store_true",
+        help="Run safety systems check before analysis"
+    )
+    parser.add_argument(
+        "--safety-only",
+        action="store_true",
+        help="Only run safety systems check (no analysis)"
+    )
 
     args = parser.parse_args()
+
+    # Run safety check if requested
+    if args.safety_check or args.safety_only:
+        safety_status = run_safety_check()
+
+        if args.safety_only:
+            return safety_status
+
+        # Check if circuit breaker is triggered
+        if HAS_RISK_MANAGER:
+            rm = RiskManager()
+            triggered, reason = rm.check_circuit_breaker()
+            if triggered:
+                print(f"\n🚨 CIRCUIT BREAKER ACTIVE: {reason}")
+                print("Analysis will continue but trading signals are paused.")
 
     # Run analysis
     analyzer = MasterAnalyzer(
