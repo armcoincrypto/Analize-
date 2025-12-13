@@ -24,6 +24,15 @@ try:
 except ImportError:
     HAS_QUANT_DB = False
 
+# Import evidence collector for behavioral data
+try:
+    from evidence_collector import (
+        EvidenceCollector, TradeOutcome, SignalContext, FalseSignal
+    )
+    HAS_EVIDENCE = True
+except ImportError:
+    HAS_EVIDENCE = False
+
 
 # Configuration
 DB_PATH = Path(__file__).parent.parent / "data" / "market_data.db"
@@ -91,14 +100,30 @@ class PaperTrader:
     # Quant database for trade persistence
     quant_db: Optional[any] = None
 
+    # Evidence collector for behavioral data
+    evidence: Optional[any] = None
+
+    # Current signal context (for evidence tracking)
+    current_signals: Optional[any] = None
+    entry_regime: str = "unknown"
+    max_favorable: float = 0.0
+    max_adverse: float = 0.0
+
     def __post_init__(self):
-        """Initialize quant database if available."""
+        """Initialize databases if available."""
         if HAS_QUANT_DB:
             try:
                 self.quant_db = QuantDatabase(str(QUANT_DB_PATH))
                 print(f"  [DB] Connected to quant database: {QUANT_DB_PATH}")
             except Exception as e:
                 print(f"  [WARN] Could not connect to quant DB: {e}")
+
+        if HAS_EVIDENCE:
+            try:
+                self.evidence = EvidenceCollector(initial_capital=self.initial_capital)
+                print(f"  [EVIDENCE] Evidence collector initialized")
+            except Exception as e:
+                print(f"  [WARN] Could not initialize evidence collector: {e}")
 
     def fetch_current_price(self) -> Optional[dict]:
         """Fetch current price from Binance."""
@@ -279,6 +304,41 @@ class PaperTrader:
                 print(f"  [DB] Trade saved to database")
             except Exception as e:
                 print(f"  [WARN] Could not save to DB: {e}")
+
+        # Save to evidence collector with full context
+        if self.evidence and HAS_EVIDENCE:
+            try:
+                # Create signal context (use stored or default)
+                signals = self.current_signals or SignalContext()
+
+                evidence_trade = TradeOutcome(
+                    trade_id=f"{self.symbol}_{self.trade_counter}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    symbol=self.symbol,
+                    side=self.position.side,
+                    entry_time=self.position.entry_time,
+                    entry_price=self.position.entry_price,
+                    entry_regime=self.entry_regime,
+                    entry_signals=signals,
+                    entry_confidence=0.5,  # Default confidence
+                    max_favorable_excursion=self.max_favorable,
+                    max_adverse_excursion=self.max_adverse,
+                    time_in_trade_seconds=int((datetime.now() - self.position.entry_time).total_seconds()),
+                    regime_changes=0,
+                    exit_time=datetime.now(),
+                    exit_price=price,
+                    exit_reason="session_end" if net_pnl_pct == 0 else ("take_profit" if net_pnl > 0 else "stop_loss"),
+                    slippage_pct=SLIPPAGE_PCT,
+                    fees_pct=(exit_fees / entry_value) * 100,
+                    gross_pnl_pct=(gross_pnl / entry_value) * 100,
+                    net_pnl_pct=net_pnl_pct,
+                    is_win=net_pnl > 0
+                )
+
+                can_continue, reason = self.evidence.record_trade(evidence_trade)
+                if not can_continue:
+                    print(f"  {reason}")
+            except Exception as e:
+                print(f"  [WARN] Could not save to evidence collector: {e}")
 
         result = "WIN ✓" if net_pnl > 0 else "LOSS ✗"
 
