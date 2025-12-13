@@ -372,7 +372,8 @@ class PaperTrader:
 
 
 def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60,
-                      buy_threshold: int = 20, sell_threshold: int = 75):
+                      buy_threshold: int = 20, sell_threshold: int = 75,
+                      symbol: str = "XRPUSDT"):
     """Run paper trading simulation."""
     print("=" * 70)
     print("PAPER TRADING SIMULATOR")
@@ -381,7 +382,7 @@ def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60,
     print("=" * 70)
 
     trader = PaperTrader(
-        symbol="XRPUSDT",
+        symbol=symbol,
         initial_capital=1000.0,
         strategy_name="Stochastic",
         strategy_params={
@@ -497,6 +498,18 @@ def run_paper_trading(duration_minutes: int = 60, check_interval: int = 60,
 
 def main():
     """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Paper Trading Simulator")
+    parser.add_argument("--symbol", default="XRPUSDT", help="Trading symbol (e.g., BTCUSDT, ETHUSDT, ATOMUSDT)")
+    parser.add_argument("--demo", action="store_true", help="Use demo mode with tight thresholds")
+    args = parser.parse_args()
+
+    symbol = args.symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol = symbol + "USDT"
+
+    print(f"\nSelected symbol: {symbol}")
     print("\nPAPER TRADING OPTIONS:")
     print("─" * 40)
     print("1. Quick test (5 minutes, 30s intervals)")
@@ -505,32 +518,38 @@ def main():
     print("4. Custom")
     print("5. DEMO MODE (tight thresholds for testing)")
 
-    try:
-        choice = input("\nSelect option (1-5): ").strip()
-    except:
-        choice = "1"
+    # Auto-select demo mode if --demo flag passed
+    if args.demo:
+        choice = "5"
+        print("\nAuto-selecting DEMO MODE (--demo flag)")
+    else:
+        try:
+            choice = input("\nSelect option (1-5): ").strip()
+        except:
+            choice = "1"
 
     if choice == "1":
-        run_paper_trading(duration_minutes=5, check_interval=30)
+        run_paper_trading(duration_minutes=5, check_interval=30, symbol=symbol)
     elif choice == "2":
-        run_paper_trading(duration_minutes=30, check_interval=60)
+        run_paper_trading(duration_minutes=30, check_interval=60, symbol=symbol)
     elif choice == "3":
-        run_paper_trading(duration_minutes=240, check_interval=300)
+        run_paper_trading(duration_minutes=240, check_interval=300, symbol=symbol)
     elif choice == "5":
         # Demo mode with tight thresholds to generate trades
         run_paper_trading(
             duration_minutes=5,
             check_interval=30,
             buy_threshold=40,    # Normal: 20
-            sell_threshold=60    # Normal: 75
+            sell_threshold=60,   # Normal: 75
+            symbol=symbol
         )
     else:
         try:
             mins = int(input("Duration (minutes): "))
             interval = int(input("Check interval (seconds): "))
-            run_paper_trading(duration_minutes=mins, check_interval=interval)
+            run_paper_trading(duration_minutes=mins, check_interval=interval, symbol=symbol)
         except:
-            run_paper_trading(duration_minutes=5, check_interval=30)
+            run_paper_trading(duration_minutes=5, check_interval=30, symbol=symbol)
 
 
 if __name__ == "__main__":
