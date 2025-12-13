@@ -269,10 +269,10 @@ def run_backtest(
                     "entry_time": timestamp,
                     "entry_idx": i,
                     "entry_regime": detect_regime(df, i),
-                    "entry_stoch": stoch_k,
-                    "entry_rsi": row["rsi"],
-                    "entry_bb_touch": row["bb_touch_lower"],
-                    "entry_macd_bull": row["macd_hist"] > 0 if not pd.isna(row["macd_hist"]) else False,
+                    "entry_stoch": float(stoch_k),
+                    "entry_rsi": float(row["rsi"]) if not pd.isna(row["rsi"]) else 50.0,
+                    "entry_bb_touch": bool(row["bb_touch_lower"]),
+                    "entry_macd_bull": bool(row["macd_hist"] > 0) if not pd.isna(row["macd_hist"]) else False,
                 }
                 max_favorable = 0.0
                 max_adverse = 0.0
@@ -284,10 +284,10 @@ def run_backtest(
                     "entry_time": timestamp,
                     "entry_idx": i,
                     "entry_regime": detect_regime(df, i),
-                    "entry_stoch": stoch_k,
-                    "entry_rsi": row["rsi"],
-                    "entry_bb_touch": row["bb_touch_upper"],
-                    "entry_macd_bull": row["macd_hist"] > 0 if not pd.isna(row["macd_hist"]) else False,
+                    "entry_stoch": float(stoch_k),
+                    "entry_rsi": float(row["rsi"]) if not pd.isna(row["rsi"]) else 50.0,
+                    "entry_bb_touch": bool(row["bb_touch_upper"]),
+                    "entry_macd_bull": bool(row["macd_hist"] > 0) if not pd.isna(row["macd_hist"]) else False,
                 }
                 max_favorable = 0.0
                 max_adverse = 0.0
