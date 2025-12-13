@@ -238,11 +238,14 @@ class AutomatedExecutor:
             adjustments.append("Session: OK")
 
         # Layer 5: Capital Scaling (phase limits)
-        if self.scaler:
+        # Skip scaling check for PAPER mode - paper trading is for validation
+        if self.scaler and self.mode != ExecutionMode.PAPER:
             min_size, max_size = self.scaler.get_position_size_range()
             if max_size == 0:
                 return False, f"SCALING BLOCKED: Phase {self.scaler.state.phase.value}", 0.0
             adjustments.append(f"Phase: {self.scaler.state.phase.value}")
+        elif self.mode == ExecutionMode.PAPER:
+            adjustments.append("Phase: PAPER (validation mode)")
 
         # Calculate combined multiplier
         combined = gate_multiplier * symbol_weight * signal_multiplier
