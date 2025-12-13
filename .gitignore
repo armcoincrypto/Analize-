@@ -60,6 +60,11 @@ data/
 *.db
 *.sqlite
 
+# Runtime state files
+session_state.json
+risk_state.json
+evidence_collector.db
+
 # Logs
 *.log
 logs/
