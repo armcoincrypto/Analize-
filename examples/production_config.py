@@ -4,19 +4,22 @@ Production Trading Configuration
 
 EVIDENCE-BASED RULES - DO NOT MODIFY WITHOUT NEW DATA
 =======================================================
-These rules are derived from 311+ backtest trades with proven statistical edge.
+UPDATED: Based on Signal Optimizer results (2025-12)
 
-Source: evidence_collector.db (backtest_to_evidence.py results)
-Date Generated: 2025-01-XX
-Total Trades Analyzed: 311
+Source: signal_optimizer.py + historical_replay.py
+Total Trades Analyzed: 255 (30-day 15m backtest)
 
-PROVEN EDGE:
-- Overall Win Rate: 73.3%
-- Best Asset: ATOMUSDT (84.1% win, +308.78% P&L)
-- Best Signal: BB+MACD (82.1% win rate)
-- Best Hours: 15:00-22:00 UTC
-- Best Days: Monday (83.3%), Tuesday (79.6%)
-- Worst Day: Thursday (51.2% - AVOID)
+OPTIMIZED STRATEGY:
+- Timeframe: 15m (NOT 1h - much higher frequency)
+- Signal: BB only (79.6% win rate, 5.21 PF)
+- Stop Loss: 1.5%
+- Take Profit: 2.0%
+- Best Asset: ATOMUSDT (only profitable symbol)
+- Est. Annual Trades: 3,102
+- Est. Annual P&L: +82.5% (backtest - expect 30-50% realistic)
+
+CRITICAL: This is BACKTEST data. Real performance will be lower.
+Paper trade for 30+ days before trusting these numbers.
 
 This config enforces ONLY proven profitable conditions.
 """
@@ -72,12 +75,12 @@ class ProductionConfig:
         ),
         "SOLUSDT": SymbolConfig(
             symbol="SOLUSDT",
-            enabled=True,
-            win_rate=68.5,
-            total_pnl_percent=30.39,
-            trade_count=92,
-            weight=0.5,  # Secondary - good but less edge
-            notes="Secondary symbol - moderate edge"
+            enabled=False,  # DISABLED - optimizer found NO profitable configs
+            win_rate=45.0,
+            total_pnl_percent=0.10,
+            trade_count=20,
+            weight=0.0,
+            notes="DISABLED: 45% win rate - no edge found in optimization"
         ),
         "XRPUSDT": SymbolConfig(
             symbol="XRPUSDT",
@@ -97,20 +100,21 @@ class ProductionConfig:
     # SIGNAL CONFIGURATION (Evidence-Based)
     # =========================================================================
 
-    # Signal combinations ranked by win rate
+    # Signal combinations ranked by OPTIMIZER results (2025-12)
+    # BB alone on 15m = 79.6% win rate, 5.21 PF, 255 trades/month
     SIGNAL_PRIORITY: List[Dict] = field(default_factory=lambda: [
-        {"signals": ["BB", "MACD"], "win_rate": 82.1, "enabled": True, "min_confidence": 75},
-        {"signals": ["MACD"], "win_rate": 76.7, "enabled": True, "min_confidence": 70},
-        {"signals": ["STOCH"], "win_rate": 76.2, "enabled": True, "min_confidence": 70},
-        {"signals": ["BB"], "win_rate": 71.8, "enabled": False, "min_confidence": 65},  # Lower win rate
-        {"signals": ["RSI"], "win_rate": 65.0, "enabled": False, "min_confidence": 60},  # Borderline
+        {"signals": ["BB"], "win_rate": 79.6, "enabled": True, "min_confidence": 70},  # BEST - high frequency
+        {"signals": ["BB", "MACD"], "win_rate": 84.0, "enabled": True, "min_confidence": 75},  # Best edge, fewer trades
+        {"signals": ["BB", "RSI"], "win_rate": 75.6, "enabled": True, "min_confidence": 70},
+        {"signals": ["RSI"], "win_rate": 74.3, "enabled": False, "min_confidence": 65},  # High frequency but lower edge
+        {"signals": ["MACD"], "win_rate": 70.0, "enabled": False, "min_confidence": 65},
     ])
 
     # Minimum signals required for entry
-    MIN_SIGNAL_COUNT: int = 2  # Require at least 2 confirming signals
+    MIN_SIGNAL_COUNT: int = 1  # BB alone is sufficient on 15m
 
-    # Required signal for all trades (must have this + others)
-    REQUIRED_SIGNAL: str = "MACD"  # Best performing signal
+    # Required signal for all trades (BB is the core signal now)
+    REQUIRED_SIGNAL: str = "BB"  # Bollinger Bands - mean reversion
 
     # =========================================================================
     # TIME CONFIGURATION (Evidence-Based)
@@ -123,26 +127,28 @@ class ProductionConfig:
 
     # Extended hours (acceptable but not optimal)
     EXTENDED_HOURS_UTC: List[int] = field(default_factory=lambda: [
-        12, 13, 14, 23, 0  # Acceptable with reduced size
+        12, 13, 14, 23  # Acceptable with reduced size (removed 00:00 - blocked)
     ])
 
-    # BLOCKED hours - never trade (03:00-06:00 UTC worst)
+    # BLOCKED hours - never trade (optimizer found 0% win rate at 00:00)
     BLOCKED_HOURS_UTC: List[int] = field(default_factory=lambda: [
+        0,  # 0% win rate in optimizer test
         3, 4, 5, 6  # Statistically worst hours
     ])
 
     # Day of week configuration (0=Monday, 6=Sunday)
+    # Updated from optimizer results
     ALLOWED_DAYS: List[int] = field(default_factory=lambda: [
-        0,  # Monday - 83.3% win rate (BEST)
-        1,  # Tuesday - 79.6% win rate
-        2,  # Wednesday - 75.0% win rate
-        4,  # Friday - 72.7% win rate
-        6,  # Sunday - 70.6% win rate
+        0,  # Monday - 100% win rate in optimizer
+        1,  # Tuesday - 100% win rate
+        4,  # Friday - 75% win rate (good)
+        6,  # Sunday - 57-67% win rate (acceptable)
     ])
 
-    # BLOCKED day - never trade
+    # BLOCKED days - never trade
     BLOCKED_DAYS: List[int] = field(default_factory=lambda: [
-        3,  # Thursday - 51.2% win rate (WORST - near coin flip!)
+        2,  # Wednesday - 38-43% win rate (WORST in optimizer)
+        3,  # Thursday - 40% win rate (also bad)
     ])
 
     # Saturday is neutral (65.2%) - trade with caution
@@ -191,8 +197,8 @@ class ProductionConfig:
     DRAWDOWN_WARNING_PERCENT: float = 10.0   # Warning at 10% drawdown
 
     # Tail Risk Protection (addresses expert concern about -10% to -15% losses)
-    MAX_SINGLE_TRADE_LOSS_PERCENT: float = 3.0  # Hard stop at 3% loss per trade
-    STOP_LOSS_PERCENT: float = 2.0              # Default stop loss
+    MAX_SINGLE_TRADE_LOSS_PERCENT: float = 2.0  # Hard stop at 2% loss per trade
+    STOP_LOSS_PERCENT: float = 1.5              # OPTIMIZED: 1.5% stop (from optimizer)
 
     # =========================================================================
     # VOLATILITY FILTER (Expert Recommended)
@@ -219,11 +225,11 @@ class ProductionConfig:
     LIMIT_ORDER_OFFSET_PERCENT: float = 0.1  # Place limits 0.1% from market
     LIMIT_ORDER_TIMEOUT_SECONDS: int = 60    # Cancel if not filled in 60s
 
-    # Take profit settings
-    TAKE_PROFIT_PERCENT: float = 3.0         # Default take profit
-    TRAILING_STOP_ENABLED: bool = True
-    TRAILING_STOP_ACTIVATION_PERCENT: float = 2.0  # Activate at 2% profit
-    TRAILING_STOP_DISTANCE_PERCENT: float = 1.0    # Trail by 1%
+    # Take profit settings - OPTIMIZED from signal_optimizer.py
+    TAKE_PROFIT_PERCENT: float = 2.0         # OPTIMIZED: 2.0% target (from optimizer)
+    TRAILING_STOP_ENABLED: bool = False      # Disabled - fixed target works better
+    TRAILING_STOP_ACTIVATION_PERCENT: float = 1.5  # Not used
+    TRAILING_STOP_DISTANCE_PERCENT: float = 0.75   # Not used
 
 
 # =============================================================================
