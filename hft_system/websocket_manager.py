@@ -478,12 +478,26 @@ class WebSocketManager:
             if now - last_time > 5:  # No data in 5 seconds
                 stale_symbols.append(symbol)
 
+        # Check WebSocket connection status safely
+        spot_connected = False
+        futures_connected = False
+        try:
+            if self.ws_spot is not None:
+                spot_connected = not self.ws_spot.closed
+        except:
+            pass
+        try:
+            if self.ws_futures is not None:
+                futures_connected = not self.ws_futures.closed
+        except:
+            pass
+
         return {
             "message_count": self.message_count,
             "reconnect_count": self.reconnect_count,
             "stale_symbols": stale_symbols,
-            "spot_connected": self.ws_spot is not None and self.ws_spot.open,
-            "futures_connected": self.ws_futures is not None and self.ws_futures.open
+            "spot_connected": spot_connected,
+            "futures_connected": futures_connected
         }
 
     async def disconnect(self):
