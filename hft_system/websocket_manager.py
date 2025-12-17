@@ -100,6 +100,50 @@ class MarkPriceData:
     timestamp: int
 
 
+class CVDBuffer:
+    """
+    Cumulative Volume Delta tracker.
+
+    CVD = cumulative (buy volume - sell volume)
+    Positive = buying pressure, Negative = selling pressure
+
+    is_buyer_maker=True means seller was aggressor (selling pressure)
+    is_buyer_maker=False means buyer was aggressor (buying pressure)
+    """
+
+    def __init__(self, max_size: int = 10000):
+        self.trades: deque = deque(maxlen=max_size)  # (timestamp, volume, is_buy)
+
+    def add_trade(self, timestamp: int, volume: float, is_buyer_maker: bool):
+        """Add a trade. is_buyer_maker=False means buyer was aggressor."""
+        is_buy = not is_buyer_maker  # Buyer aggressor = buy
+        self.trades.append((timestamp, volume, is_buy))
+
+    def get_cvd(self, window_sec: int) -> dict:
+        """Get CVD stats for the last N seconds."""
+        if not self.trades:
+            return {"cvd": 0, "buy_volume": 0, "sell_volume": 0}
+
+        now = self.trades[-1][0]
+        cutoff = now - (window_sec * 1000)
+
+        buy_vol = 0
+        sell_vol = 0
+
+        for ts, vol, is_buy in self.trades:
+            if ts >= cutoff:
+                if is_buy:
+                    buy_vol += vol
+                else:
+                    sell_vol += vol
+
+        return {
+            "cvd": buy_vol - sell_vol,
+            "buy_volume": buy_vol,
+            "sell_volume": sell_vol
+        }
+
+
 class PriceBuffer:
     """Circular buffer for tracking price history."""
 
@@ -187,6 +231,7 @@ class WebSocketManager:
         # Data buffers per symbol
         self.price_buffers: Dict[str, PriceBuffer] = {}
         self.volume_buffers: Dict[str, VolumeBuffer] = {}
+        self.cvd_buffers: Dict[str, CVDBuffer] = {}  # CVD tracking
         self.orderbooks: Dict[str, OrderBookData] = {}
         self.mark_prices: Dict[str, MarkPriceData] = {}
         self.latest_klines: Dict[str, KlineData] = {}
@@ -207,6 +252,7 @@ class WebSocketManager:
             config = get_asset_config(symbol)
             self.price_buffers[config.exchange_symbol] = PriceBuffer()
             self.volume_buffers[config.exchange_symbol] = VolumeBuffer()
+            self.cvd_buffers[config.exchange_symbol] = CVDBuffer()
 
     def _build_stream_names(self) -> tuple:
         """Build stream names for spot and futures."""
@@ -361,6 +407,14 @@ class WebSocketManager:
                 trade.timestamp
             )
 
+        # Update CVD buffer
+        if symbol in self.cvd_buffers:
+            self.cvd_buffers[symbol].add_trade(
+                trade.timestamp,
+                trade.quantity * trade.price,  # Volume in quote currency
+                trade.is_buyer_maker
+            )
+
         self.last_message_time[symbol] = time.time()
 
         # Callback
@@ -466,6 +520,33 @@ class WebSocketManager:
         if mark:
             return mark.funding_rate
         return None
+
+    def get_cvd(self, symbol: str) -> dict:
+        """
+        Get CVD (Cumulative Volume Delta) data for symbol.
+
+        Returns dict with cvd_1m, cvd_5m, cvd_15m and buy/sell volumes.
+        """
+        exchange_symbol = get_asset_config(symbol).exchange_symbol
+        buffer = self.cvd_buffers.get(exchange_symbol)
+
+        if buffer:
+            cvd_1m = buffer.get_cvd(60)
+            cvd_5m = buffer.get_cvd(300)
+            cvd_15m = buffer.get_cvd(900)
+
+            return {
+                "cvd_1m": cvd_1m["cvd"],
+                "cvd_5m": cvd_5m["cvd"],
+                "cvd_15m": cvd_15m["cvd"],
+                "buy_volume_1m": cvd_1m["buy_volume"],
+                "sell_volume_1m": cvd_1m["sell_volume"]
+            }
+
+        return {
+            "cvd_1m": 0, "cvd_5m": 0, "cvd_15m": 0,
+            "buy_volume_1m": 0, "sell_volume_1m": 0
+        }
 
     def get_connection_stats(self) -> dict:
         """Get connection statistics."""

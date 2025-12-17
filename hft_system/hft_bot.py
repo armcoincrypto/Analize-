@@ -156,6 +156,10 @@ class HFTBot:
                     if signal.entry_price and signal.entry_price > 0:
                         self.trade_logger.update_signal_outcomes(symbol, signal.entry_price)
 
+                    # Log CVD (Cumulative Volume Delta) snapshot
+                    cvd_data = self.ws_manager.get_cvd(symbol)
+                    self.trade_logger.log_cvd_snapshot(symbol, cvd_data)
+
                 # Batch commit every 10 scans
                 scan_count += 1
                 if scan_count % 10 == 0:

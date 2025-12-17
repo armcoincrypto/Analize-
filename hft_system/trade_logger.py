@@ -170,6 +170,7 @@ class TradeLogger:
         """)
 
         # Strategy signals - log ALL potential signals for multi-strategy analysis
+        # Now with extended outcome tracking up to 10 minutes
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS strategy_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,8 +185,45 @@ class TradeLogger:
                 rsi_cond INTEGER DEFAULT 0,
                 price_after_60s REAL,
                 price_after_90s REAL,
+                price_after_2m REAL,
+                price_after_3m REAL,
+                price_after_5m REAL,
+                price_after_10m REAL,
                 pnl_60s REAL,
-                pnl_90s REAL
+                pnl_90s REAL,
+                pnl_2m REAL,
+                pnl_3m REAL,
+                pnl_5m REAL,
+                pnl_10m REAL,
+                max_up_10m REAL,
+                max_down_10m REAL
+            )
+        """)
+
+        # Trade flow - track every trade for buy/sell pressure analysis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_flow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                is_buyer_maker INTEGER,
+                trade_value REAL
+            )
+        """)
+
+        # CVD (Cumulative Volume Delta) snapshots
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cvd_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                cvd_1m REAL,
+                cvd_5m REAL,
+                cvd_15m REAL,
+                buy_volume_1m REAL,
+                sell_volume_1m REAL
             )
         """)
 
@@ -199,6 +237,9 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicator_timestamp ON indicator_snapshots(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_signals_conditions ON strategy_signals(conditions_met)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_flow_timestamp ON trade_flow(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_flow_symbol ON trade_flow(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cvd_timestamp ON cvd_snapshots(timestamp)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -447,47 +488,91 @@ class TradeLogger:
         """
         Update old strategy signals with what price became.
 
-        This fills in price_after_60s, price_after_90s, pnl_60s, pnl_90s
-        so we can analyze which signals would have been profitable.
+        Tracks outcomes at: 60s, 90s, 2m, 3m, 5m, 10m
+        This lets us analyze which timeframe is most profitable.
         """
         try:
             now = int(time.time() * 1000)
             cursor = self.conn.cursor()
 
-            # Update signals from ~60 seconds ago (55-65s window)
-            cursor.execute("""
-                UPDATE strategy_signals
-                SET price_after_60s = ?,
-                    pnl_60s = ((? - price) / price) * 100
-                WHERE symbol = ?
-                  AND price_after_60s IS NULL
-                  AND timestamp BETWEEN ? AND ?
-            """, (
-                current_price,
-                current_price,
-                symbol,
-                now - 65000,  # 65 seconds ago
-                now - 55000   # 55 seconds ago
-            ))
+            # Define time windows (target_ms, window_ms, column_price, column_pnl)
+            time_windows = [
+                (60000, 5000, "price_after_60s", "pnl_60s"),
+                (90000, 5000, "price_after_90s", "pnl_90s"),
+                (120000, 5000, "price_after_2m", "pnl_2m"),
+                (180000, 5000, "price_after_3m", "pnl_3m"),
+                (300000, 10000, "price_after_5m", "pnl_5m"),
+                (600000, 15000, "price_after_10m", "pnl_10m"),
+            ]
 
-            # Update signals from ~90 seconds ago (85-95s window)
-            cursor.execute("""
-                UPDATE strategy_signals
-                SET price_after_90s = ?,
-                    pnl_90s = ((? - price) / price) * 100
-                WHERE symbol = ?
-                  AND price_after_90s IS NULL
-                  AND timestamp BETWEEN ? AND ?
-            """, (
-                current_price,
-                current_price,
-                symbol,
-                now - 95000,  # 95 seconds ago
-                now - 85000   # 85 seconds ago
-            ))
+            for target_ms, window_ms, price_col, pnl_col in time_windows:
+                cursor.execute(f"""
+                    UPDATE strategy_signals
+                    SET {price_col} = ?,
+                        {pnl_col} = ((? - price) / price) * 100
+                    WHERE symbol = ?
+                      AND {price_col} IS NULL
+                      AND timestamp BETWEEN ? AND ?
+                """, (
+                    current_price,
+                    current_price,
+                    symbol,
+                    now - target_ms - window_ms,
+                    now - target_ms + window_ms
+                ))
 
         except Exception as e:
             pass  # Silent fail for performance
+
+    def log_trade_flow(self, symbol: str, price: float, quantity: float, is_buyer_maker: bool):
+        """
+        Log individual trade for buy/sell pressure analysis.
+
+        is_buyer_maker=True means the buyer was the maker (seller was aggressor = selling pressure)
+        is_buyer_maker=False means the seller was the maker (buyer was aggressor = buying pressure)
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO trade_flow (timestamp, symbol, price, quantity, is_buyer_maker, trade_value)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                price,
+                quantity,
+                1 if is_buyer_maker else 0,
+                price * quantity
+            ))
+        except Exception as e:
+            pass  # Silent fail
+
+    def log_cvd_snapshot(self, symbol: str, cvd_data: dict):
+        """
+        Log CVD (Cumulative Volume Delta) snapshot.
+
+        CVD = Sum of (buy volume - sell volume)
+        Positive CVD = more buying pressure
+        Negative CVD = more selling pressure
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO cvd_snapshots (
+                    timestamp, symbol, cvd_1m, cvd_5m, cvd_15m,
+                    buy_volume_1m, sell_volume_1m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                cvd_data.get("cvd_1m", 0),
+                cvd_data.get("cvd_5m", 0),
+                cvd_data.get("cvd_15m", 0),
+                cvd_data.get("buy_volume_1m", 0),
+                cvd_data.get("sell_volume_1m", 0)
+            ))
+        except Exception as e:
+            pass  # Silent fail
 
     def _update_daily_stats(self):
         """Update daily statistics."""
