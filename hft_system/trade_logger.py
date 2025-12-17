@@ -1,0 +1,456 @@
+"""
+Trade Logger for HFT System
+===========================
+Stores all trades, signals, and market data in SQLite for analysis.
+
+Tables:
+- trades: All completed trades with entry/exit details
+- signals: All generated signals (even rejected ones)
+- market_snapshots: Periodic market state snapshots
+- daily_stats: Daily performance summaries
+"""
+
+import sqlite3
+import logging
+import time
+import json
+from typing import Dict, Optional, List
+from datetime import datetime, date
+from pathlib import Path
+
+from .config import SYSTEM_CONFIG
+from .signal_engine import Signal, ConditionResult
+from .execution_engine import TradeResult, ExitResult
+from .risk_controller import RiskDecision
+
+logger = logging.getLogger(__name__)
+
+
+class TradeLogger:
+    """
+    SQLite-based trade and signal logger.
+
+    All data persisted for post-analysis.
+    """
+
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or SYSTEM_CONFIG.db_path
+        self.conn = None
+        self._init_database()
+
+    def _init_database(self):
+        """Initialize database with required tables."""
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+
+        cursor = self.conn.cursor()
+
+        # Trades table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT UNIQUE,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                quantity REAL NOT NULL,
+                entry_time INTEGER NOT NULL,
+                exit_time INTEGER,
+                pnl REAL,
+                pnl_pct REAL,
+                hold_time_sec REAL,
+                exit_reason TEXT,
+                mfe REAL,
+                mae REAL,
+                conditions_met INTEGER,
+                signal_confidence REAL,
+                status TEXT DEFAULT 'open',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Signals table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                conditions_met INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                condition_details TEXT,
+                risk_approved INTEGER,
+                risk_reason TEXT,
+                trade_executed INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Market snapshots table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                price_change_60s REAL,
+                volume_spike REAL,
+                orderbook_imbalance REAL,
+                funding_rate REAL,
+                rsi REAL,
+                btc_volatility REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Daily stats table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT UNIQUE NOT NULL,
+                total_trades INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                gross_pnl REAL DEFAULT 0,
+                net_pnl REAL DEFAULT 0,
+                win_rate REAL DEFAULT 0,
+                avg_win REAL DEFAULT 0,
+                avg_loss REAL DEFAULT 0,
+                profit_factor REAL DEFAULT 0,
+                max_drawdown REAL DEFAULT 0,
+                signals_generated INTEGER DEFAULT 0,
+                signals_rejected INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create indexes for faster queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON market_snapshots(timestamp)")
+
+        self.conn.commit()
+        logger.info(f"Database initialized: {self.db_path}")
+
+    def log_signal(
+        self,
+        signal: Signal,
+        risk_decision: RiskDecision,
+        executed: bool = False
+    ):
+        """Log a generated signal."""
+        try:
+            condition_details = json.dumps([
+                {
+                    "name": c.name,
+                    "triggered": c.triggered,
+                    "value": c.value,
+                    "threshold": c.threshold,
+                    "message": c.message
+                }
+                for c in signal.conditions
+            ])
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO signals (
+                    timestamp, symbol, signal_type, conditions_met,
+                    confidence, entry_price, condition_details,
+                    risk_approved, risk_reason, trade_executed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                signal.timestamp,
+                signal.symbol,
+                signal.signal_type.value,
+                signal.conditions_met,
+                signal.confidence,
+                signal.entry_price,
+                condition_details,
+                1 if risk_decision.approved else 0,
+                risk_decision.reason.value,
+                1 if executed else 0
+            ))
+
+            self.conn.commit()
+
+        except Exception as e:
+            logger.error(f"Error logging signal: {e}")
+
+    def log_trade_entry(self, result: TradeResult, signal: Signal):
+        """Log trade entry."""
+        try:
+            trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO trades (
+                    trade_id, symbol, side, entry_price, quantity,
+                    entry_time, conditions_met, signal_confidence, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
+            """, (
+                trade_id,
+                result.symbol,
+                result.side,
+                result.entry_price,
+                result.quantity,
+                result.timestamp,
+                signal.conditions_met,
+                signal.confidence
+            ))
+
+            self.conn.commit()
+            logger.debug(f"Trade entry logged: {trade_id}")
+
+        except Exception as e:
+            logger.error(f"Error logging trade entry: {e}")
+
+    def log_trade_exit(self, result: ExitResult, mfe: float = 0, mae: float = 0):
+        """Log trade exit and update trade record."""
+        try:
+            cursor = self.conn.cursor()
+
+            # Find the open trade
+            cursor.execute("""
+                UPDATE trades SET
+                    exit_price = ?,
+                    exit_time = ?,
+                    pnl = ?,
+                    pnl_pct = ?,
+                    hold_time_sec = ?,
+                    exit_reason = ?,
+                    mfe = ?,
+                    mae = ?,
+                    status = 'closed'
+                WHERE symbol = ? AND status = 'open'
+            """, (
+                result.exit_price,
+                result.timestamp,
+                result.pnl,
+                result.pnl_pct,
+                result.hold_time_sec,
+                result.reason.value,
+                mfe,
+                mae,
+                result.symbol
+            ))
+
+            self.conn.commit()
+            logger.debug(f"Trade exit logged: {result.symbol}")
+
+            # Update daily stats
+            self._update_daily_stats()
+
+        except Exception as e:
+            logger.error(f"Error logging trade exit: {e}")
+
+    def log_market_snapshot(self, symbol: str, data: Dict):
+        """Log periodic market snapshot."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO market_snapshots (
+                    timestamp, symbol, price, price_change_60s,
+                    volume_spike, orderbook_imbalance, funding_rate,
+                    rsi, btc_volatility
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                data.get("price", 0),
+                data.get("price_change_60s", 0),
+                data.get("volume_spike", 0),
+                data.get("orderbook_imbalance", 0),
+                data.get("funding_rate", 0),
+                data.get("rsi", 0),
+                data.get("btc_volatility", 0)
+            ))
+
+            self.conn.commit()
+
+        except Exception as e:
+            logger.error(f"Error logging market snapshot: {e}")
+
+    def _update_daily_stats(self):
+        """Update daily statistics."""
+        try:
+            today = str(date.today())
+            cursor = self.conn.cursor()
+
+            # Get today's trades
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                    SUM(pnl) as gross_pnl,
+                    AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_win,
+                    AVG(CASE WHEN pnl <= 0 THEN pnl ELSE NULL END) as avg_loss
+                FROM trades
+                WHERE DATE(created_at) = DATE('now') AND status = 'closed'
+            """)
+
+            row = cursor.fetchone()
+
+            if row and row["total"] > 0:
+                total = row["total"]
+                wins = row["wins"] or 0
+                losses = row["losses"] or 0
+                gross_pnl = row["gross_pnl"] or 0
+                avg_win = row["avg_win"] or 0
+                avg_loss = abs(row["avg_loss"] or 0)
+
+                win_rate = (wins / total * 100) if total > 0 else 0
+                profit_factor = (avg_win * wins) / (avg_loss * losses) if losses > 0 and avg_loss > 0 else 0
+
+                # Get signal stats
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) as generated,
+                        SUM(CASE WHEN risk_approved = 0 THEN 1 ELSE 0 END) as rejected
+                    FROM signals
+                    WHERE DATE(created_at) = DATE('now')
+                """)
+                sig_row = cursor.fetchone()
+                signals_generated = sig_row["generated"] or 0
+                signals_rejected = sig_row["rejected"] or 0
+
+                # Upsert daily stats
+                cursor.execute("""
+                    INSERT INTO daily_stats (
+                        date, total_trades, wins, losses, gross_pnl,
+                        win_rate, avg_win, avg_loss, profit_factor,
+                        signals_generated, signals_rejected
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date) DO UPDATE SET
+                        total_trades = excluded.total_trades,
+                        wins = excluded.wins,
+                        losses = excluded.losses,
+                        gross_pnl = excluded.gross_pnl,
+                        win_rate = excluded.win_rate,
+                        avg_win = excluded.avg_win,
+                        avg_loss = excluded.avg_loss,
+                        profit_factor = excluded.profit_factor,
+                        signals_generated = excluded.signals_generated,
+                        signals_rejected = excluded.signals_rejected
+                """, (
+                    today, total, wins, losses, gross_pnl,
+                    win_rate, avg_win, avg_loss, profit_factor,
+                    signals_generated, signals_rejected
+                ))
+
+                self.conn.commit()
+
+        except Exception as e:
+            logger.error(f"Error updating daily stats: {e}")
+
+    def get_recent_trades(self, limit: int = 50) -> List[Dict]:
+        """Get recent trades."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM trades
+            ORDER BY entry_time DESC
+            LIMIT ?
+        """, (limit,))
+
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_daily_stats(self, days: int = 30) -> List[Dict]:
+        """Get daily stats for last N days."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM daily_stats
+            ORDER BY date DESC
+            LIMIT ?
+        """, (days,))
+
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_performance_summary(self) -> Dict:
+        """Get overall performance summary."""
+        cursor = self.conn.cursor()
+
+        # Total stats
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as total_pnl,
+                AVG(pnl) as avg_pnl,
+                AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_win,
+                AVG(CASE WHEN pnl <= 0 THEN pnl ELSE NULL END) as avg_loss,
+                AVG(hold_time_sec) as avg_hold_time,
+                AVG(mfe) as avg_mfe,
+                AVG(mae) as avg_mae
+            FROM trades
+            WHERE status = 'closed'
+        """)
+
+        row = cursor.fetchone()
+
+        if not row or row["total_trades"] == 0:
+            return {"message": "No trades yet"}
+
+        total = row["total_trades"]
+        wins = row["wins"] or 0
+        losses = row["losses"] or 0
+        avg_win = row["avg_win"] or 0
+        avg_loss = abs(row["avg_loss"] or 0)
+
+        win_rate = (wins / total * 100) if total > 0 else 0
+        profit_factor = (avg_win * wins) / (avg_loss * losses) if losses > 0 and avg_loss > 0 else 0
+
+        # Exit reason breakdown
+        cursor.execute("""
+            SELECT exit_reason, COUNT(*) as count
+            FROM trades
+            WHERE status = 'closed'
+            GROUP BY exit_reason
+        """)
+        exit_reasons = {row["exit_reason"]: row["count"] for row in cursor.fetchall()}
+
+        # Per-symbol stats
+        cursor.execute("""
+            SELECT
+                symbol,
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(pnl) as total_pnl
+            FROM trades
+            WHERE status = 'closed'
+            GROUP BY symbol
+        """)
+        per_symbol = {
+            row["symbol"]: {
+                "trades": row["trades"],
+                "wins": row["wins"],
+                "pnl": row["total_pnl"]
+            }
+            for row in cursor.fetchall()
+        }
+
+        return {
+            "total_trades": total,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "total_pnl": row["total_pnl"],
+            "avg_pnl": row["avg_pnl"],
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "profit_factor": profit_factor,
+            "avg_hold_time_sec": row["avg_hold_time"],
+            "avg_mfe": row["avg_mfe"],
+            "avg_mae": row["avg_mae"],
+            "exit_reasons": exit_reasons,
+            "per_symbol": per_symbol
+        }
+
+    def close(self):
+        """Close database connection."""
+        if self.conn:
+            self.conn.close()
+            logger.info("Database connection closed")
