@@ -169,6 +169,26 @@ class TradeLogger:
             )
         """)
 
+        # Strategy signals - log ALL potential signals for multi-strategy analysis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                conditions_met INTEGER NOT NULL,
+                price_cond INTEGER DEFAULT 0,
+                volume_cond INTEGER DEFAULT 0,
+                orderbook_cond INTEGER DEFAULT 0,
+                funding_cond INTEGER DEFAULT 0,
+                rsi_cond INTEGER DEFAULT 0,
+                price_after_60s REAL,
+                price_after_90s REAL,
+                pnl_60s REAL,
+                pnl_90s REAL
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -177,6 +197,8 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tick_timestamp ON tick_data(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tick_symbol ON tick_data(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicator_timestamp ON indicator_snapshots(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_signals_conditions ON strategy_signals(conditions_met)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -379,6 +401,38 @@ class TradeLogger:
                 data.get("orderbook_imbalance", 0),
                 data.get("conditions_met", 0)
             ))
+        except Exception as e:
+            pass  # Silent fail for performance
+
+    def log_strategy_signal(self, symbol: str, price: float, conditions: Dict):
+        """
+        Log potential strategy signal for multi-strategy analysis.
+
+        Logs when ANY condition is met (1/5 or higher), so later
+        we can analyze which threshold (1/5, 2/5, 3/5, etc.) is optimal.
+        """
+        try:
+            conditions_met = sum(1 for v in conditions.values() if v)
+
+            if conditions_met >= 1:  # Log when at least 1 condition met
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    INSERT INTO strategy_signals (
+                        timestamp, symbol, price, conditions_met,
+                        price_cond, volume_cond, orderbook_cond,
+                        funding_cond, rsi_cond
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    int(time.time() * 1000),
+                    symbol,
+                    price,
+                    conditions_met,
+                    1 if conditions.get("price_movement", False) else 0,
+                    1 if conditions.get("volume_spike", False) else 0,
+                    1 if conditions.get("orderbook_imbalance", False) else 0,
+                    1 if conditions.get("derivatives_signal", False) else 0,
+                    1 if conditions.get("micro_indicator", False) else 0
+                ))
         except Exception as e:
             pass  # Silent fail for performance
 

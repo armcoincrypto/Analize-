@@ -61,8 +61,7 @@ class HFTBot:
         )
         self.trade_logger = TradeLogger()
 
-        # Wire up callbacks
-        self.signal_engine.on_signal = self._on_signal
+        # Wire up callbacks (don't use async callback for signal - handle in scan loop)
         self.execution_engine.on_trade = self._on_trade
         self.execution_engine.on_exit = self._on_exit
 
@@ -122,6 +121,10 @@ class HFTBot:
                 # Scan all assets for signals
                 signals = self.signal_engine.scan_all_assets()
 
+                # Process any valid signals
+                for signal in signals:
+                    await self._on_signal(signal)
+
                 # Log indicator snapshot every scan (1 second)
                 for symbol in SYSTEM_CONFIG.enabled_assets:
                     signal = self.signal_engine.check_all_conditions(symbol)
@@ -132,6 +135,10 @@ class HFTBot:
 
                     # Log indicator values
                     self.trade_logger.log_indicator_snapshot(symbol, status)
+
+                    # Log strategy signal for multi-strategy analysis
+                    conditions = {c.name: c.triggered for c in signal.conditions}
+                    self.trade_logger.log_strategy_signal(symbol, signal.entry_price, conditions)
 
                     # Log orderbook snapshot
                     orderbook = self.ws_manager.get_orderbook(symbol)
