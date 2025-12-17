@@ -143,7 +143,7 @@ class HFTBot:
                 logger.error(f"Error in status loop: {e}")
 
     def _print_status(self):
-        """Print current bot status."""
+        """Print current bot status with condition debug info."""
         uptime = (datetime.now() - self.start_time).total_seconds() / 3600
 
         risk_status = self.risk_controller.get_status()
@@ -160,6 +160,14 @@ class HFTBot:
                    f"Losses remaining: {risk_status['daily_stats']['max_losses_remaining']}")
         logger.info(f"  WebSocket: {ws_stats['message_count']} msgs | "
                    f"Reconnects: {ws_stats['reconnect_count']}")
+
+        # Show condition status for each asset
+        logger.info("  CONDITIONS (need 3/5):")
+        for symbol in SYSTEM_CONFIG.enabled_assets:
+            signal = self.signal_engine.check_all_conditions(symbol)
+            triggered = [c.name[:6] for c in signal.conditions if c.triggered]
+            price = signal.entry_price
+            logger.info(f"    {symbol}: ${price:.4f} | {signal.conditions_met}/5 | {triggered}")
 
         if positions:
             logger.info(f"  Open positions:")
