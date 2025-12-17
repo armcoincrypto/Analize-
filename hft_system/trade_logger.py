@@ -443,6 +443,52 @@ class TradeLogger:
         except Exception as e:
             logger.error(f"Error in batch commit: {e}")
 
+    def update_signal_outcomes(self, symbol: str, current_price: float):
+        """
+        Update old strategy signals with what price became.
+
+        This fills in price_after_60s, price_after_90s, pnl_60s, pnl_90s
+        so we can analyze which signals would have been profitable.
+        """
+        try:
+            now = int(time.time() * 1000)
+            cursor = self.conn.cursor()
+
+            # Update signals from ~60 seconds ago (55-65s window)
+            cursor.execute("""
+                UPDATE strategy_signals
+                SET price_after_60s = ?,
+                    pnl_60s = ((? - price) / price) * 100
+                WHERE symbol = ?
+                  AND price_after_60s IS NULL
+                  AND timestamp BETWEEN ? AND ?
+            """, (
+                current_price,
+                current_price,
+                symbol,
+                now - 65000,  # 65 seconds ago
+                now - 55000   # 55 seconds ago
+            ))
+
+            # Update signals from ~90 seconds ago (85-95s window)
+            cursor.execute("""
+                UPDATE strategy_signals
+                SET price_after_90s = ?,
+                    pnl_90s = ((? - price) / price) * 100
+                WHERE symbol = ?
+                  AND price_after_90s IS NULL
+                  AND timestamp BETWEEN ? AND ?
+            """, (
+                current_price,
+                current_price,
+                symbol,
+                now - 95000,  # 95 seconds ago
+                now - 85000   # 85 seconds ago
+            ))
+
+        except Exception as e:
+            pass  # Silent fail for performance
+
     def _update_daily_stats(self):
         """Update daily statistics."""
         try:

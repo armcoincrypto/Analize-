@@ -152,6 +152,10 @@ class HFTBot:
                             "imbalance": orderbook.imbalance_ratio
                         })
 
+                    # Update old signals with current price (for outcome tracking)
+                    if signal.entry_price and signal.entry_price > 0:
+                        self.trade_logger.update_signal_outcomes(symbol, signal.entry_price)
+
                 # Batch commit every 10 scans
                 scan_count += 1
                 if scan_count % 10 == 0:
