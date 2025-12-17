@@ -115,17 +115,40 @@ class HFTBot:
         await asyncio.sleep(30)
 
         logger.info("Starting signal scan loop")
+        scan_count = 0
 
         while self.running:
             try:
                 # Scan all assets for signals
                 signals = self.signal_engine.scan_all_assets()
 
-                # Log market snapshot periodically (every 60s)
-                status = self.signal_engine.get_status()
-                for symbol, data in status.items():
-                    if data.get("price"):
-                        self.trade_logger.log_market_snapshot(symbol, data)
+                # Log indicator snapshot every scan (1 second)
+                for symbol in SYSTEM_CONFIG.enabled_assets:
+                    signal = self.signal_engine.check_all_conditions(symbol)
+                    status = self.signal_engine.get_status().get(symbol, {})
+
+                    # Add conditions_met to status
+                    status["conditions_met"] = signal.conditions_met
+
+                    # Log indicator values
+                    self.trade_logger.log_indicator_snapshot(symbol, status)
+
+                    # Log orderbook snapshot
+                    orderbook = self.ws_manager.get_orderbook(symbol)
+                    if orderbook:
+                        self.trade_logger.log_orderbook_snapshot(symbol, {
+                            "best_bid": orderbook.best_bid,
+                            "best_ask": orderbook.best_ask,
+                            "bid_volume": orderbook.bid_volume,
+                            "ask_volume": orderbook.ask_volume,
+                            "spread_pct": orderbook.spread,
+                            "imbalance": orderbook.imbalance_ratio
+                        })
+
+                # Batch commit every 10 scans
+                scan_count += 1
+                if scan_count % 10 == 0:
+                    self.trade_logger.batch_commit()
 
                 await asyncio.sleep(1)  # Scan every second
 

@@ -126,11 +126,57 @@ class TradeLogger:
             )
         """)
 
+        # Tick data table - stores every price update for analysis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tick_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                volume REAL,
+                is_buyer_maker INTEGER
+            )
+        """)
+
+        # Orderbook snapshots - for microstructure analysis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                best_bid REAL,
+                best_ask REAL,
+                bid_volume REAL,
+                ask_volume REAL,
+                spread_pct REAL,
+                imbalance REAL
+            )
+        """)
+
+        # Indicator values - for strategy optimization
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS indicator_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL,
+                rsi REAL,
+                volume_spike REAL,
+                price_change_60s REAL,
+                funding_rate REAL,
+                orderbook_imbalance REAL,
+                conditions_met INTEGER
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON market_snapshots(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tick_timestamp ON tick_data(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tick_symbol ON tick_data(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicator_timestamp ON indicator_snapshots(timestamp)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -272,6 +318,76 @@ class TradeLogger:
 
         except Exception as e:
             logger.error(f"Error logging market snapshot: {e}")
+
+    def log_tick(self, symbol: str, price: float, volume: float, is_buyer_maker: bool):
+        """Log individual tick/trade data."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO tick_data (timestamp, symbol, price, volume, is_buyer_maker)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                price,
+                volume,
+                1 if is_buyer_maker else 0
+            ))
+            # Don't commit every tick - batch commit
+        except Exception as e:
+            pass  # Silent fail for performance
+
+    def log_orderbook_snapshot(self, symbol: str, data: Dict):
+        """Log orderbook snapshot for microstructure analysis."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO orderbook_snapshots (
+                    timestamp, symbol, best_bid, best_ask,
+                    bid_volume, ask_volume, spread_pct, imbalance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                data.get("best_bid", 0),
+                data.get("best_ask", 0),
+                data.get("bid_volume", 0),
+                data.get("ask_volume", 0),
+                data.get("spread_pct", 0),
+                data.get("imbalance", 0)
+            ))
+        except Exception as e:
+            pass  # Silent fail for performance
+
+    def log_indicator_snapshot(self, symbol: str, data: Dict):
+        """Log all indicator values for strategy analysis."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO indicator_snapshots (
+                    timestamp, symbol, price, rsi, volume_spike,
+                    price_change_60s, funding_rate, orderbook_imbalance, conditions_met
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                data.get("price", 0),
+                data.get("rsi", 0),
+                data.get("volume_spike", 0),
+                data.get("price_change_60s", 0),
+                data.get("funding_rate", 0),
+                data.get("orderbook_imbalance", 0),
+                data.get("conditions_met", 0)
+            ))
+        except Exception as e:
+            pass  # Silent fail for performance
+
+    def batch_commit(self):
+        """Commit batched writes (call periodically)."""
+        try:
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error in batch commit: {e}")
 
     def _update_daily_stats(self):
         """Update daily statistics."""
