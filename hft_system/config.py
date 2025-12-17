@@ -130,8 +130,8 @@ class SystemConfig:
     # Assets to trade
     enabled_assets: List[str] = field(default_factory=lambda: ["ATOM", "SUI", "XRP"])
 
-    # Entry conditions required (minimum 3 of 5)
-    min_entry_conditions: int = 3
+    # Entry conditions required (2/5 for data collection, 3/5 for production)
+    min_entry_conditions: int = 2
 
 
 # Global configs
