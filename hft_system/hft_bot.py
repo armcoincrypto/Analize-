@@ -74,7 +74,7 @@ class HFTBot:
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
         logger.info(f"  Assets: {', '.join(SYSTEM_CONFIG.enabled_assets)}")
-        logger.info(f"  Entry: 3/5 conditions required")
+        logger.info(f"  Entry: {SYSTEM_CONFIG.min_entry_conditions}/5 conditions required")
         logger.info(f"  Exit: +2% TP, -1% SL, 90s time stop")
 
     async def _on_signal(self, signal):

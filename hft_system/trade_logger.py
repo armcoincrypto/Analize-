@@ -40,8 +40,16 @@ class TradeLogger:
 
     def _init_database(self):
         """Initialize database with required tables."""
-        self.conn = sqlite3.connect(self.db_path)
+        # Allow multi-thread access and set timeout to avoid "database is locked"
+        self.conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+            timeout=30.0  # Wait up to 30s for lock
+        )
         self.conn.row_factory = sqlite3.Row
+        # Enable WAL mode for better concurrency
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
 
         cursor = self.conn.cursor()
 
