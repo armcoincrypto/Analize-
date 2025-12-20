@@ -125,6 +125,28 @@ class HFTBot:
                     "actual_price": result.entry_price,   # Actual fill price
                     "side": signal.signal_type.value
                 }
+
+                # TASK 8: Log trade causality - WHY this signal triggered
+                ob_causality = self.ws_manager.get_orderbook_causality_data(signal.symbol)
+                cvd_data = {
+                    "delta_1s": trade_flow.get("delta_1s", 0),
+                    "delta_3s": trade_flow.get("delta_3s", 0),
+                    "delta_5s": trade_flow.get("net_delta", 0)  # Use net_delta as 5s proxy
+                }
+                price_velocity = self.ws_manager.get_price_velocity(signal.symbol)
+                btc_data = self.ws_manager.get_btc_data()
+
+                primary_cause = self.trade_logger.log_trade_causality(
+                    trade_id=trade_id,
+                    symbol=signal.symbol,
+                    orderbook_data=ob_causality,
+                    cvd_data=cvd_data,
+                    price_velocity=price_velocity,
+                    btc_data=btc_data
+                )
+
+                # Log primary cause in trade entry message
+                logger.info(f"  Primary cause: {primary_cause}")
         else:
             logger.info(f"Signal rejected: {signal.symbol} - {risk_decision.message}")
 
@@ -366,6 +388,14 @@ class HFTBot:
             logger.info(f"  Exit breakdown: {micro_stats.get('exit_breakdown', {})}")
             if "evaluation" in micro_stats:
                 logger.info(f"  EVALUATION: {micro_stats['evaluation']}")
+
+        # TASK 8: Causality analysis - WHY trades happened
+        causality_stats = self.trade_logger.get_causality_stats()
+        if "cause_breakdown" in causality_stats and causality_stats["cause_breakdown"]:
+            logger.info("-" * 60)
+            logger.info("TRADE CAUSALITY (WHY signals triggered)")
+            for cause, data in causality_stats["cause_breakdown"].items():
+                logger.info(f"  {cause}: {data['count']} trades (strength: {data['avg_strength']:.4f})")
 
         logger.info("=" * 60)
 

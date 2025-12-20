@@ -300,6 +300,48 @@ class TradeLogger:
             )
         """)
 
+        # TASK 8: Trade causality - WHY the move happened
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_causality (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT UNIQUE NOT NULL,
+                symbol TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+
+                -- Orderbook state (top 5 levels)
+                ob_bid1_price REAL,
+                ob_bid1_size REAL,
+                ob_ask1_price REAL,
+                ob_ask1_size REAL,
+                ob_top5_bid_volume REAL,
+                ob_top5_ask_volume REAL,
+                ob_imbalance_ratio REAL,
+                ob_spread_pct REAL,
+
+                -- CVD (Cumulative Volume Delta) momentum
+                cvd_delta_1s REAL,
+                cvd_delta_3s REAL,
+                cvd_delta_5s REAL,
+
+                -- Price velocity (micro moves)
+                price_velocity_1s REAL,
+                price_velocity_3s REAL,
+                price_velocity_5s REAL,
+
+                -- Correlated symbols
+                btc_price_change_1s REAL,
+                btc_price_change_3s REAL,
+                btc_delta_1s REAL,
+
+                -- Primary causal factor
+                primary_cause TEXT,
+                cause_strength REAL,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (trade_id) REFERENCES trades(trade_id)
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -316,6 +358,8 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_entry_flow_trade_id ON trade_entry_flow(trade_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_quality_trade_id ON trade_quality_metrics(trade_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_quality_exit_reason ON trade_quality_metrics(exit_reason)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_causality_trade_id ON trade_causality(trade_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_causality_cause ON trade_causality(primary_cause)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -796,6 +840,146 @@ class TradeLogger:
             logger.debug(f"Trade quality metrics logged: {trade_id}")
         except Exception as e:
             logger.error(f"Error logging trade quality metrics: {e}")
+
+    def log_trade_causality(
+        self,
+        trade_id: str,
+        symbol: str,
+        orderbook_data: dict,
+        cvd_data: dict,
+        price_velocity: dict,
+        btc_data: dict
+    ) -> str:
+        """
+        TASK 8: Log WHY the trade signal happened.
+
+        Captures causal context:
+        - Orderbook state (top 5 levels)
+        - CVD delta (buy/sell pressure momentum)
+        - Price velocity (micro moves)
+        - BTC correlation
+
+        Returns: primary_cause (the top factor)
+        """
+        try:
+            # Determine primary causal factor
+            causes = []
+
+            # Check orderbook imbalance
+            ob_imbalance = orderbook_data.get("imbalance_ratio", 0.5)
+            if ob_imbalance > 0.65:
+                causes.append(("ob_bullish_imbalance", ob_imbalance - 0.5))
+            elif ob_imbalance < 0.35:
+                causes.append(("ob_bearish_imbalance", 0.5 - ob_imbalance))
+
+            # Check CVD momentum
+            cvd_1s = cvd_data.get("delta_1s", 0)
+            cvd_3s = cvd_data.get("delta_3s", 0)
+            if abs(cvd_1s) > 1000:  # Significant volume delta
+                if cvd_1s > 0:
+                    causes.append(("cvd_buy_pressure", cvd_1s / 10000))
+                else:
+                    causes.append(("cvd_sell_pressure", abs(cvd_1s) / 10000))
+
+            # Check price velocity
+            velocity_1s = price_velocity.get("velocity_1s", 0)
+            velocity_3s = price_velocity.get("velocity_3s", 0)
+            if abs(velocity_1s) > 0.01:  # >0.01% in 1s is significant
+                if velocity_1s > 0:
+                    causes.append(("price_momentum_up", velocity_1s))
+                else:
+                    causes.append(("price_momentum_down", abs(velocity_1s)))
+
+            # Check BTC correlation
+            btc_change = btc_data.get("price_change_1s", 0)
+            if abs(btc_change) > 0.02:  # BTC moved >0.02%
+                if btc_change > 0:
+                    causes.append(("btc_bullish", btc_change))
+                else:
+                    causes.append(("btc_bearish", abs(btc_change)))
+
+            # Sort by strength and get primary cause
+            causes.sort(key=lambda x: x[1], reverse=True)
+            primary_cause = causes[0][0] if causes else "unknown"
+            cause_strength = causes[0][1] if causes else 0
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO trade_causality (
+                    trade_id, symbol, timestamp,
+                    ob_bid1_price, ob_bid1_size, ob_ask1_price, ob_ask1_size,
+                    ob_top5_bid_volume, ob_top5_ask_volume, ob_imbalance_ratio, ob_spread_pct,
+                    cvd_delta_1s, cvd_delta_3s, cvd_delta_5s,
+                    price_velocity_1s, price_velocity_3s, price_velocity_5s,
+                    btc_price_change_1s, btc_price_change_3s, btc_delta_1s,
+                    primary_cause, cause_strength
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_id,
+                symbol,
+                int(time.time() * 1000),
+                orderbook_data.get("bid1_price", 0),
+                orderbook_data.get("bid1_size", 0),
+                orderbook_data.get("ask1_price", 0),
+                orderbook_data.get("ask1_size", 0),
+                orderbook_data.get("top5_bid_volume", 0),
+                orderbook_data.get("top5_ask_volume", 0),
+                orderbook_data.get("imbalance_ratio", 0),
+                orderbook_data.get("spread_pct", 0),
+                cvd_data.get("delta_1s", 0),
+                cvd_data.get("delta_3s", 0),
+                cvd_data.get("delta_5s", 0),
+                price_velocity.get("velocity_1s", 0),
+                price_velocity.get("velocity_3s", 0),
+                price_velocity.get("velocity_5s", 0),
+                btc_data.get("price_change_1s", 0),
+                btc_data.get("price_change_3s", 0),
+                btc_data.get("delta_1s", 0),
+                primary_cause,
+                cause_strength
+            ))
+            self.conn.commit()
+            logger.info(f"Trade causality: {trade_id} -> {primary_cause} (strength: {cause_strength:.4f})")
+            return primary_cause
+        except Exception as e:
+            logger.error(f"Error logging trade causality: {e}")
+            return "error"
+
+    def get_causality_stats(self) -> Dict:
+        """Get aggregate stats on trade causality factors."""
+        try:
+            cursor = self.conn.cursor()
+
+            # Get breakdown by primary cause
+            cursor.execute("""
+                SELECT
+                    primary_cause,
+                    COUNT(*) as count,
+                    AVG(cause_strength) as avg_strength
+                FROM trade_causality
+                GROUP BY primary_cause
+                ORDER BY count DESC
+            """)
+
+            cause_breakdown = {
+                r[0]: {
+                    "count": r[1],
+                    "avg_strength": round(r[2], 4) if r[2] else 0
+                }
+                for r in cursor.fetchall()
+            }
+
+            # Get total trades with causality data
+            cursor.execute("SELECT COUNT(*) FROM trade_causality")
+            total = cursor.fetchone()[0]
+
+            return {
+                "total_trades_with_causality": total,
+                "cause_breakdown": cause_breakdown
+            }
+        except Exception as e:
+            logger.error(f"Error getting causality stats: {e}")
+            return {"error": str(e)}
 
     def get_microstructure_stats(self) -> Dict:
         """

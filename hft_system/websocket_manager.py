@@ -646,6 +646,96 @@ class WebSocketManager:
             "is_delta_positive": False
         }
 
+    def get_price_velocity(self, symbol: str) -> dict:
+        """
+        TASK 8: Get price velocity (micro moves) for causality analysis.
+
+        Returns price change % over 1s, 3s, 5s windows.
+        """
+        velocity_1s = self.get_price_change(symbol, 1) or 0
+        velocity_3s = self.get_price_change(symbol, 3) or 0
+        velocity_5s = self.get_price_change(symbol, 5) or 0
+
+        return {
+            "velocity_1s": velocity_1s,
+            "velocity_3s": velocity_3s,
+            "velocity_5s": velocity_5s
+        }
+
+    def get_orderbook_causality_data(self, symbol: str) -> dict:
+        """
+        TASK 8: Get detailed orderbook data for causality analysis.
+
+        Returns top level prices/sizes and aggregated volumes.
+        """
+        orderbook = self.get_orderbook(symbol)
+        if not orderbook:
+            return {
+                "bid1_price": 0,
+                "bid1_size": 0,
+                "ask1_price": 0,
+                "ask1_size": 0,
+                "top5_bid_volume": 0,
+                "top5_ask_volume": 0,
+                "imbalance_ratio": 0.5,
+                "spread_pct": 0
+            }
+
+        # Get top level
+        bid1_price = orderbook.bids[0][0] if orderbook.bids else 0
+        bid1_size = orderbook.bids[0][1] if orderbook.bids else 0
+        ask1_price = orderbook.asks[0][0] if orderbook.asks else 0
+        ask1_size = orderbook.asks[0][1] if orderbook.asks else 0
+
+        # Get top 5 levels volume
+        top5_bid_volume = sum(qty for _, qty in orderbook.bids[:5])
+        top5_ask_volume = sum(qty for _, qty in orderbook.asks[:5])
+
+        return {
+            "bid1_price": bid1_price,
+            "bid1_size": bid1_size,
+            "ask1_price": ask1_price,
+            "ask1_size": ask1_size,
+            "top5_bid_volume": top5_bid_volume,
+            "top5_ask_volume": top5_ask_volume,
+            "imbalance_ratio": orderbook.imbalance_ratio,
+            "spread_pct": orderbook.spread
+        }
+
+    def get_btc_data(self) -> dict:
+        """
+        TASK 8: Get BTC correlation data for causality analysis.
+
+        Returns BTC price changes and delta.
+        """
+        # Try to get BTC data (might not be in enabled_assets)
+        btc_symbols = ["BTC", "BTCUSDT"]
+        btc_price_1s = 0
+        btc_price_3s = 0
+        btc_delta_1s = 0
+
+        for btc_sym in btc_symbols:
+            try:
+                exchange_sym = btc_sym.upper() + ("" if btc_sym.endswith("USDT") else "USDT")
+                buffer = self.price_buffers.get(exchange_sym)
+                if buffer:
+                    btc_price_1s = buffer.get_price_change(1) or 0
+                    btc_price_3s = buffer.get_price_change(3) or 0
+                    break
+
+                cvd_buffer = self.cvd_buffers.get(exchange_sym)
+                if cvd_buffer:
+                    btc_delta_1s = cvd_buffer.get_delta_1s()
+                    break
+            except:
+                pass
+
+        return {
+            "price_change_1s": btc_price_1s,
+            "price_change_3s": btc_price_3s,
+            "delta_1s": btc_delta_1s
+        }
+
     def get_connection_stats(self) -> dict:
         """Get connection statistics."""
         now = time.time()
