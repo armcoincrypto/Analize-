@@ -26,13 +26,17 @@ from hft_system.hft_bot import main
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       MICROSTRUCTURE BOT v2 (Event-Based Exits)               ║
+║       MICROSTRUCTURE BOT v3 (Liquidity Reaction Engine)       ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Assets: ATOM, SUI, XRP                                       ║
 ║  Entry: Orderbook imbalance >60% (1 condition only)           ║
 ║  Exits: TP +0.15% | SL -0.1% | Micro +0.05% on OB weaken      ║
 ║         OB Flip | Delta Negative | Spread 2x | No Movement    ║
-║  Trade Flow: Aggressive buy/sell, delta 1s/3s tracking        ║
+╠══════════════════════════════════════════════════════════════╣
+║  Trade Quality Metrics (TASK 6 & 7):                          ║
+║  - Entry/Exit imbalance, spread, buy/sell ratio tracked       ║
+║  - Slippage + cost tracking per trade                         ║
+║  - Avg PnL, Exit Speed, Invalidation % (not win rate!)        ║
+║  Expected: 2-20s trades, small consistent edge                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
     main()

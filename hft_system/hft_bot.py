@@ -70,6 +70,9 @@ class HFTBot:
         self.trades_executed = 0
         self.start_time = None
 
+        # TASK 6: Track entry conditions for quality metrics
+        self.entry_conditions: dict = {}  # trade_id -> {flow, orderbook, signal_price}
+
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
@@ -110,6 +113,18 @@ class HFTBot:
                     spread_pct=orderbook.spread if orderbook else None,
                     snapshot_type="entry"
                 )
+
+                # TASK 6: Store entry conditions for quality metrics
+                self.entry_conditions[trade_id] = {
+                    "flow": trade_flow.copy(),
+                    "orderbook": {
+                        "imbalance": orderbook.imbalance_ratio if orderbook else 0,
+                        "spread_pct": orderbook.spread if orderbook else 0
+                    },
+                    "signal_price": signal.entry_price,  # Expected entry price
+                    "actual_price": result.entry_price,   # Actual fill price
+                    "side": signal.signal_type.value
+                }
         else:
             logger.info(f"Signal rejected: {signal.symbol} - {risk_decision.message}")
 
@@ -125,16 +140,40 @@ class HFTBot:
 
         # Log MICROSTRUCTURE trade flow at exit
         trade_id = f"{result.symbol}_{result.entry_time}"
-        trade_flow = self.ws_manager.get_trade_flow(result.symbol)
+        exit_flow = self.ws_manager.get_trade_flow(result.symbol)
         orderbook = self.ws_manager.get_orderbook(result.symbol)
         self.trade_logger.log_trade_entry_flow(
             trade_id=trade_id,
             symbol=result.symbol,
-            trade_flow=trade_flow,
+            trade_flow=exit_flow,
             orderbook_imbalance=orderbook.imbalance_ratio if orderbook else None,
             spread_pct=orderbook.spread if orderbook else None,
             snapshot_type="exit"
         )
+
+        # TASK 6: Log consolidated trade quality metrics
+        entry_cond = self.entry_conditions.pop(trade_id, None)
+        if entry_cond:
+            exit_orderbook = {
+                "imbalance": orderbook.imbalance_ratio if orderbook else 0,
+                "spread_pct": orderbook.spread if orderbook else 0
+            }
+            self.trade_logger.log_trade_quality_metrics(
+                trade_id=trade_id,
+                symbol=result.symbol,
+                side=entry_cond.get("side", "unknown"),
+                entry_flow=entry_cond.get("flow", {}),
+                exit_flow=exit_flow,
+                entry_orderbook=entry_cond.get("orderbook", {}),
+                exit_orderbook=exit_orderbook,
+                time_in_trade_sec=result.hold_time_sec,
+                exit_reason=result.reason.value,
+                pnl_pct=result.pnl_pct,
+                expected_entry_price=entry_cond.get("signal_price", result.entry_price),
+                actual_entry_price=entry_cond.get("actual_price", result.entry_price),
+                expected_exit_price=result.exit_price,  # For paper, expected=actual
+                actual_exit_price=result.exit_price
+            )
 
     async def _signal_scan_loop(self):
         """Periodically scan for signals."""
@@ -241,6 +280,19 @@ class HFTBot:
             for symbol, pos in positions.items():
                 logger.info(f"    {symbol}: {pos['pnl_pct']:+.2f}% | "
                           f"Hold: {pos['hold_time_sec']:.0f}s / {pos['time_stop_at']}s")
+
+        # TASK 7: Microstructure performance metrics
+        micro_stats = self.trade_logger.get_microstructure_stats()
+        if "total_trades" in micro_stats and micro_stats["total_trades"] > 0:
+            logger.info("  MICROSTRUCTURE METRICS:")
+            logger.info(f"    Avg PnL: {micro_stats['avg_pnl_pct']:+.4f}% | "
+                       f"Net Edge: {micro_stats['net_edge_after_costs_pct']:+.4f}%")
+            logger.info(f"    Avg Hold: {micro_stats['avg_hold_time_sec']:.1f}s | "
+                       f"Exit <5s: {micro_stats['pct_exited_within_5s']:.1f}%")
+            logger.info(f"    Invalidation Exits: {micro_stats['pct_exited_by_invalidation']:.1f}% | "
+                       f"Costs: {micro_stats['avg_total_cost_pct']:.4f}%")
+            if "evaluation" in micro_stats:
+                logger.info(f"    {micro_stats['evaluation']}")
         logger.info("=" * 60)
 
     async def start(self):
@@ -299,6 +351,21 @@ class HFTBot:
             logger.info(f"  Exit reasons: {summary['exit_reasons']}")
         else:
             logger.info(f"  {summary['message']}")
+
+        # TASK 7: Microstructure final stats
+        micro_stats = self.trade_logger.get_microstructure_stats()
+        if "total_trades" in micro_stats and micro_stats["total_trades"] > 0:
+            logger.info("-" * 60)
+            logger.info("MICROSTRUCTURE PERFORMANCE (what matters)")
+            logger.info(f"  Avg PnL per trade: {micro_stats['avg_pnl_pct']:+.4f}%")
+            logger.info(f"  Net edge after costs: {micro_stats['net_edge_after_costs_pct']:+.4f}%")
+            logger.info(f"  Avg hold time: {micro_stats['avg_hold_time_sec']:.1f}s")
+            logger.info(f"  Exited within 5s: {micro_stats['pct_exited_within_5s']:.1f}%")
+            logger.info(f"  Exited by invalidation: {micro_stats['pct_exited_by_invalidation']:.1f}%")
+            logger.info(f"  Avg total cost: {micro_stats['avg_total_cost_pct']:.4f}%")
+            logger.info(f"  Exit breakdown: {micro_stats.get('exit_breakdown', {})}")
+            if "evaluation" in micro_stats:
+                logger.info(f"  EVALUATION: {micro_stats['evaluation']}")
 
         logger.info("=" * 60)
 

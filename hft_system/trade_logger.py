@@ -257,6 +257,49 @@ class TradeLogger:
             )
         """)
 
+        # TASK 6: Trade quality metrics - consolidated view for analysis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_quality_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT UNIQUE NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+
+                -- Entry conditions
+                imbalance_at_entry REAL,
+                spread_at_entry REAL,
+                delta_at_entry REAL,
+                buy_sell_ratio_entry REAL,
+
+                -- Exit conditions
+                imbalance_at_exit REAL,
+                spread_at_exit REAL,
+                delta_at_exit REAL,
+                buy_sell_ratio_exit REAL,
+
+                -- Trade metrics
+                time_in_trade_sec REAL,
+                exit_reason TEXT,
+                pnl_pct REAL,
+
+                -- Slippage tracking
+                expected_entry_price REAL,
+                actual_entry_price REAL,
+                entry_slippage_pct REAL,
+                expected_exit_price REAL,
+                actual_exit_price REAL,
+                exit_slippage_pct REAL,
+                total_cost_pct REAL,
+
+                -- Quality flags
+                exited_within_5s INTEGER DEFAULT 0,
+                exited_by_invalidation INTEGER DEFAULT 0,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (trade_id) REFERENCES trades(trade_id)
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -271,6 +314,8 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_flow_symbol ON trade_flow(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cvd_timestamp ON cvd_snapshots(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_entry_flow_trade_id ON trade_entry_flow(trade_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_quality_trade_id ON trade_quality_metrics(trade_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_quality_exit_reason ON trade_quality_metrics(exit_reason)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -654,6 +699,222 @@ class TradeLogger:
             logger.debug(f"Trade flow logged for {trade_id}: delta={trade_flow.get('net_delta', 0):.2f}")
         except Exception as e:
             logger.error(f"Error logging trade entry flow: {e}")
+
+    def log_trade_quality_metrics(
+        self,
+        trade_id: str,
+        symbol: str,
+        side: str,
+        entry_flow: dict,
+        exit_flow: dict,
+        entry_orderbook: dict,
+        exit_orderbook: dict,
+        time_in_trade_sec: float,
+        exit_reason: str,
+        pnl_pct: float,
+        expected_entry_price: float,
+        actual_entry_price: float,
+        expected_exit_price: float,
+        actual_exit_price: float
+    ):
+        """
+        TASK 6: Log consolidated trade quality metrics for analysis.
+
+        This is the PRIMARY table for evaluating trade quality.
+        Called when trade is closed to capture all metrics.
+        """
+        try:
+            # Calculate buy/sell ratios
+            entry_buy = entry_flow.get("aggressive_buy_vol", 0)
+            entry_sell = entry_flow.get("aggressive_sell_vol", 0)
+            entry_total = entry_buy + entry_sell
+            buy_sell_ratio_entry = entry_buy / entry_total if entry_total > 0 else 0.5
+
+            exit_buy = exit_flow.get("aggressive_buy_vol", 0)
+            exit_sell = exit_flow.get("aggressive_sell_vol", 0)
+            exit_total = exit_buy + exit_sell
+            buy_sell_ratio_exit = exit_buy / exit_total if exit_total > 0 else 0.5
+
+            # Calculate slippage
+            entry_slippage = 0
+            if expected_entry_price > 0:
+                entry_slippage = (actual_entry_price - expected_entry_price) / expected_entry_price * 100
+
+            exit_slippage = 0
+            if expected_exit_price > 0:
+                exit_slippage = (actual_exit_price - expected_exit_price) / expected_exit_price * 100
+
+            # Total cost = entry slippage + exit slippage + spread
+            entry_spread = entry_orderbook.get("spread_pct", 0) or 0
+            exit_spread = exit_orderbook.get("spread_pct", 0) or 0
+            total_cost = abs(entry_slippage) + abs(exit_slippage) + (entry_spread + exit_spread) / 2
+
+            # Quality flags
+            exited_within_5s = 1 if time_in_trade_sec <= 5 else 0
+
+            # Invalidation exits: OB_FLIP, DELTA_NEGATIVE, SPREAD_WIDEN, NO_MOVEMENT, FLOW_NEUTRAL
+            invalidation_reasons = ["ob_flip", "delta_negative", "spread_widen", "no_movement", "flow_neutral"]
+            exited_by_invalidation = 1 if exit_reason.lower() in invalidation_reasons else 0
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO trade_quality_metrics (
+                    trade_id, symbol, side,
+                    imbalance_at_entry, spread_at_entry, delta_at_entry, buy_sell_ratio_entry,
+                    imbalance_at_exit, spread_at_exit, delta_at_exit, buy_sell_ratio_exit,
+                    time_in_trade_sec, exit_reason, pnl_pct,
+                    expected_entry_price, actual_entry_price, entry_slippage_pct,
+                    expected_exit_price, actual_exit_price, exit_slippage_pct,
+                    total_cost_pct, exited_within_5s, exited_by_invalidation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_id,
+                symbol,
+                side,
+                entry_orderbook.get("imbalance", 0),
+                entry_orderbook.get("spread_pct", 0),
+                entry_flow.get("net_delta", 0),
+                buy_sell_ratio_entry,
+                exit_orderbook.get("imbalance", 0),
+                exit_orderbook.get("spread_pct", 0),
+                exit_flow.get("net_delta", 0),
+                buy_sell_ratio_exit,
+                time_in_trade_sec,
+                exit_reason,
+                pnl_pct,
+                expected_entry_price,
+                actual_entry_price,
+                entry_slippage,
+                expected_exit_price,
+                actual_exit_price,
+                exit_slippage,
+                total_cost,
+                exited_within_5s,
+                exited_by_invalidation
+            ))
+            self.conn.commit()
+            logger.debug(f"Trade quality metrics logged: {trade_id}")
+        except Exception as e:
+            logger.error(f"Error logging trade quality metrics: {e}")
+
+    def get_microstructure_stats(self) -> Dict:
+        """
+        TASK 7: Get microstructure performance stats.
+
+        Returns metrics that matter for microstructure trading:
+        - Average profit per trade (expect small)
+        - % of trades exited within 5 seconds
+        - % of trades exited by invalidation
+        - Slippage + spread impact
+
+        Success = small consistent edge, not big wins.
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Get aggregate stats from trade_quality_metrics
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total_trades,
+                    AVG(pnl_pct) as avg_pnl_pct,
+                    AVG(time_in_trade_sec) as avg_hold_time,
+                    SUM(exited_within_5s) * 100.0 / COUNT(*) as pct_exited_within_5s,
+                    SUM(exited_by_invalidation) * 100.0 / COUNT(*) as pct_exited_by_invalidation,
+                    AVG(total_cost_pct) as avg_total_cost,
+                    AVG(entry_slippage_pct) as avg_entry_slippage,
+                    AVG(exit_slippage_pct) as avg_exit_slippage,
+                    AVG(spread_at_entry) as avg_entry_spread,
+                    AVG(spread_at_exit) as avg_exit_spread
+                FROM trade_quality_metrics
+            """)
+            row = cursor.fetchone()
+
+            if not row or row[0] == 0:
+                return {"message": "No trade quality data yet"}
+
+            # Get exit reason breakdown
+            cursor.execute("""
+                SELECT exit_reason, COUNT(*) as count,
+                       AVG(pnl_pct) as avg_pnl,
+                       AVG(time_in_trade_sec) as avg_time
+                FROM trade_quality_metrics
+                GROUP BY exit_reason
+                ORDER BY count DESC
+            """)
+            exit_breakdown = {
+                r[0]: {
+                    "count": r[1],
+                    "avg_pnl_pct": round(r[2], 4) if r[2] else 0,
+                    "avg_time_sec": round(r[3], 2) if r[3] else 0
+                }
+                for r in cursor.fetchall()
+            }
+
+            # Calculate net edge after costs
+            avg_pnl = row[1] or 0
+            avg_cost = row[5] or 0
+            net_edge = avg_pnl - avg_cost
+
+            return {
+                "total_trades": row[0],
+                "avg_pnl_pct": round(row[1], 4) if row[1] else 0,
+                "avg_hold_time_sec": round(row[2], 2) if row[2] else 0,
+                "pct_exited_within_5s": round(row[3], 1) if row[3] else 0,
+                "pct_exited_by_invalidation": round(row[4], 1) if row[4] else 0,
+                "avg_total_cost_pct": round(row[5], 4) if row[5] else 0,
+                "avg_entry_slippage_pct": round(row[6], 4) if row[6] else 0,
+                "avg_exit_slippage_pct": round(row[7], 4) if row[7] else 0,
+                "avg_spread_pct": round((row[8] or 0 + row[9] or 0) / 2, 4),
+                "net_edge_after_costs_pct": round(net_edge, 4),
+                "exit_breakdown": exit_breakdown,
+                "evaluation": self._evaluate_microstructure_performance(
+                    row[0], avg_pnl, row[2], row[3], net_edge
+                )
+            }
+        except Exception as e:
+            logger.error(f"Error getting microstructure stats: {e}")
+            return {"error": str(e)}
+
+    def _evaluate_microstructure_performance(
+        self,
+        total_trades: int,
+        avg_pnl: float,
+        avg_hold_time: float,
+        pct_quick_exit: float,
+        net_edge: float
+    ) -> str:
+        """Evaluate performance based on microstructure criteria."""
+        issues = []
+        goods = []
+
+        # Check trade duration (expect 2-20 seconds)
+        if avg_hold_time and avg_hold_time > 20:
+            issues.append(f"Hold time too long ({avg_hold_time:.1f}s, expect 2-20s)")
+        elif avg_hold_time and avg_hold_time <= 20:
+            goods.append(f"Good hold time ({avg_hold_time:.1f}s)")
+
+        # Check quick exit rate (expect high)
+        if pct_quick_exit and pct_quick_exit < 30:
+            issues.append(f"Low quick exit rate ({pct_quick_exit:.1f}%, expect >30%)")
+        elif pct_quick_exit and pct_quick_exit >= 50:
+            goods.append(f"Good quick exit rate ({pct_quick_exit:.1f}%)")
+
+        # Check net edge (must be positive after costs)
+        if net_edge < 0:
+            issues.append(f"Negative edge after costs ({net_edge:.4f}%)")
+        elif net_edge > 0.005:
+            goods.append(f"Positive edge ({net_edge:.4f}%)")
+
+        # Check if enough trades
+        if total_trades < 50:
+            issues.append(f"Need more trades for reliable stats ({total_trades})")
+
+        if issues:
+            return "NEEDS WORK: " + "; ".join(issues)
+        elif goods:
+            return "GOOD: " + "; ".join(goods)
+        else:
+            return "INSUFFICIENT DATA"
 
     def _update_daily_stats(self):
         """Update daily statistics."""
