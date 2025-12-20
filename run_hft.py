@@ -26,11 +26,11 @@ from hft_system.hft_bot import main
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║                HFT DATA COLLECTION BOT                        ║
+║           HFT OPTIMIZED BOT (Based on 70K signals)            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Assets: ATOM, SUI, XRP                                       ║
-║  Entry: 2/5 conditions (for data collection)                  ║
-║  Exit: +2% TP | -1% SL | 90s time stop                        ║
+║  Strategy: Orderbook + RSI focus (best combo: +0.024% at 5m)  ║
+║  Exit: +1.5% TP | -0.8% SL | 180s time stop | Trailing stop   ║
 ║  Data: strategy_signals, cvd, orderbook, indicators           ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

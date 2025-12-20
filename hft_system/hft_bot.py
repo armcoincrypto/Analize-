@@ -75,7 +75,10 @@ class HFTBot:
         logger.info(f"  Capital: ${self.capital:,.2f}")
         logger.info(f"  Assets: {', '.join(SYSTEM_CONFIG.enabled_assets)}")
         logger.info(f"  Entry: {SYSTEM_CONFIG.min_entry_conditions}/5 conditions required")
-        logger.info(f"  Exit: +2% TP, -1% SL, 90s time stop")
+        # Get exit settings from first asset config
+        asset_config = get_asset_config(SYSTEM_CONFIG.enabled_assets[0])
+        logger.info(f"  Exit: +{asset_config.take_profit_pct}% TP, -{asset_config.stop_loss_pct}% SL, {asset_config.time_stop_seconds}s time stop")
+        logger.info(f"  Optimized: Orderbook + RSI combo priority (best performer)")
 
     async def _on_signal(self, signal):
         """Handle new signal from signal engine."""

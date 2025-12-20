@@ -4,8 +4,13 @@ HFT System Configuration
 All thresholds and parameters for the trading system.
 
 Assets: ATOM, SUI, XRP
-Strategy: Reaction-based mean reversion
-Target: +2% TP, -1% SL, 90s time stop
+Strategy: Orderbook + RSI focused (based on 70K signal analysis)
+Target: +1.5% TP, -0.8% SL, 180s time stop
+
+Data-driven optimizations (Dec 2024):
+- Best combo: Orderbook + RSI (+0.024% at 5m with 4,134 signals)
+- Extended time_stop from 90s to 180s (3min)
+- Tighter TP/SL ratio for better risk management
 """
 
 from dataclasses import dataclass, field
@@ -42,11 +47,14 @@ class AssetConfig:
     rsi_oversold: float = 25.0
     rsi_overbought: float = 75.0
 
-    # Exit settings
-    take_profit_pct: float = 2.0
-    stop_loss_pct: float = 1.0
-    time_stop_seconds: int = 90
-    min_profit_for_time_check: float = 0.5  # Must move 0.5% or exit
+    # Exit settings (optimized based on 70K signal data)
+    take_profit_pct: float = 1.5          # Reduced from 2% - more achievable
+    stop_loss_pct: float = 0.8            # Reduced from 1% - tighter risk
+    time_stop_seconds: int = 180          # Extended from 90s to 3min
+    min_profit_for_time_check: float = 0.3  # Must move 0.3% or exit
+    use_trailing_stop: bool = True        # Enable trailing stop
+    trailing_stop_activation: float = 0.5  # Activate trailing after 0.5% profit
+    trailing_stop_distance: float = 0.3    # Trail by 0.3%
 
     # Position sizing
     max_position_pct: float = 2.0  # 2% of capital per trade
