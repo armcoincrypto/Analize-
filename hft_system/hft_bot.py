@@ -21,7 +21,7 @@ import sys
 import argparse
 from datetime import datetime
 
-from .config import SYSTEM_CONFIG, ASSETS, TradingMode
+from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config
 from .websocket_manager import WebSocketManager
 from .signal_engine import SignalEngine
 from .risk_controller import RiskController
