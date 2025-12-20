@@ -1,16 +1,17 @@
 """
 HFT System Configuration
 ========================
-All thresholds and parameters for the trading system.
+MICROSTRUCTURE TRADING (based on 141K signal analysis)
 
-Assets: ATOM, SUI, XRP
-Strategy: Orderbook + RSI focused (based on 70K signal analysis)
-Target: +1.5% TP, -0.8% SL, 180s time stop
+Key insight from data:
+- Orderbook alone: +0.012% at 5m (BEST) - 55,781 signals
+- 1/5 condition optimal - more conditions = worse
+- Edge is 0.008-0.014% - match targets to edge
 
-Data-driven optimizations (Dec 2024):
-- Best combo: Orderbook + RSI (+0.024% at 5m with 4,134 signals)
-- Extended time_stop from 90s to 180s (3min)
-- Tighter TP/SL ratio for better risk management
+Strategy: Orderbook microstructure, NOT scalping
+- Hold 10-30 seconds, not minutes
+- TP 0.15%, SL 0.1% - match actual edge
+- Event-based exit, not time-based
 """
 
 from dataclasses import dataclass, field
@@ -47,14 +48,15 @@ class AssetConfig:
     rsi_oversold: float = 25.0
     rsi_overbought: float = 75.0
 
-    # Exit settings (optimized based on 70K signal data)
-    take_profit_pct: float = 1.5          # Reduced from 2% - more achievable
-    stop_loss_pct: float = 0.8            # Reduced from 1% - tighter risk
-    time_stop_seconds: int = 180          # Extended from 90s to 3min
-    min_profit_for_time_check: float = 0.3  # Must move 0.3% or exit
-    use_trailing_stop: bool = True        # Enable trailing stop
-    trailing_stop_activation: float = 0.5  # Activate trailing after 0.5% profit
-    trailing_stop_distance: float = 0.3    # Trail by 0.3%
+    # Exit settings (MICROSTRUCTURE - based on 141K signal analysis)
+    # Edge is 0.008-0.014% - targets must match!
+    take_profit_pct: float = 0.15         # Realistic for microstructure
+    stop_loss_pct: float = 0.10           # Tight risk - 1.5:1 reward/risk
+    time_stop_seconds: int = 30           # Micro trades = 10-30 seconds
+    min_profit_for_time_check: float = 0.05  # Any profit = exit at time
+    use_trailing_stop: bool = False       # Not useful for micro trades
+    trailing_stop_activation: float = 0.08  # Lower activation
+    trailing_stop_distance: float = 0.05   # Tight trail
 
     # Position sizing
     max_position_pct: float = 2.0  # 2% of capital per trade
@@ -96,8 +98,8 @@ class RiskConfig:
     max_daily_losses: int = 3
     max_daily_drawdown_pct: float = 3.0
 
-    # Trade limits
-    min_time_between_trades_sec: int = 30
+    # Trade limits - microstructure = fast
+    min_time_between_trades_sec: int = 5
 
     # Market filters
     btc_max_volatility_5m: float = 4.0  # Disable if BTC moves >4% in 5min
@@ -138,8 +140,9 @@ class SystemConfig:
     # Assets to trade
     enabled_assets: List[str] = field(default_factory=lambda: ["ATOM", "SUI", "XRP"])
 
-    # Entry conditions required (2/5 for data collection, 3/5 for production)
-    min_entry_conditions: int = 2
+    # Entry conditions - data shows 1/5 is OPTIMAL (more = worse)
+    # Orderbook alone: +0.012% at 5m with 55,781 signals
+    min_entry_conditions: int = 1
 
 
 # Global configs

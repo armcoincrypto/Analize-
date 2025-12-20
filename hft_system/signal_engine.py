@@ -1,22 +1,21 @@
 """
-Signal Engine for HFT System
-============================
-Detects entry signals using 5 conditions.
+Signal Engine for HFT System - MICROSTRUCTURE
+==============================================
+Based on 141K signal analysis:
 
-OPTIMIZED based on 70,687 signal analysis (Dec 2024):
-- Best combo: Orderbook + RSI (+0.024% at 5m with 4,134 signals)
-- Orderbook alone: +0.017% at 5m with 32,222 signals
-- More conditions != better performance
+PROVEN BEST: Orderbook alone (+0.012% at 5m with 55,781 signals)
+- 1/5 condition is OPTIMAL - more conditions = WORSE
+- RSI adds no value when combined with Orderbook
 
-CONDITIONS:
-1. Price Movement - Sharp drop (0.8-1.2%) or spike within 60 seconds
+CONDITIONS (in order of effectiveness):
+1. Order Book Imbalance - Bid/Ask ratio > 60% [PRIMARY - USE ALONE]
 2. Volume Spike - Current volume > 2.5x average
-3. Order Book Imbalance - Bid/Ask ratio > 60% [PRIORITY]
-4. Derivatives Signal - Negative funding rate (shorts paying longs)
-5. Micro Indicator - RSI oversold (<25) or overbought (>75) [PRIORITY]
+3. Micro Indicator - RSI (less effective than orderbook)
+4. Price Movement - Sharp drop/spike
+5. Derivatives Signal - Funding rate
 
-Entry triggered when 2+ conditions are True.
-Best performance with Orderbook + RSI combination.
+Entry: 1 condition required (Orderbook imbalance preferred)
+Exit: 0.15% TP, 0.1% SL, 30s time stop
 """
 
 import logging
@@ -398,10 +397,9 @@ class SignalEngine:
         triggered = [c for c in conditions if c.triggered]
         conditions_met = len(triggered)
 
-        # Check for best combo: Orderbook + RSI (data-driven optimization)
+        # MICROSTRUCTURE: Orderbook ALONE is best (141K signal analysis)
+        # RSI adds NO value - only use orderbook imbalance
         orderbook_triggered = any(c.name == "orderbook_imbalance" and c.triggered for c in conditions)
-        rsi_triggered = any(c.name == "micro_indicator" and c.triggered for c in conditions)
-        is_best_combo = orderbook_triggered and rsi_triggered
 
         # Determine signal direction from triggered conditions
         long_votes = sum(1 for c in triggered if c.direction == SignalType.LONG)
@@ -417,11 +415,10 @@ class SignalEngine:
         # Get current price
         current_price = self.ws.get_current_price(symbol) or 0
 
-        # Calculate confidence (0-1 based on conditions met)
-        # Boost confidence for Orderbook + RSI combo (best performer)
+        # Calculate confidence - BOOST for Orderbook alone (proven best)
         confidence = conditions_met / len(conditions)
-        if is_best_combo:
-            confidence = min(1.0, confidence + 0.2)  # 20% confidence boost
+        if orderbook_triggered:
+            confidence = min(1.0, confidence + 0.3)  # 30% boost for orderbook
 
         signal = Signal(
             symbol=symbol,

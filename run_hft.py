@@ -26,12 +26,12 @@ from hft_system.hft_bot import main
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║           HFT OPTIMIZED BOT (Based on 70K signals)            ║
+║       MICROSTRUCTURE BOT (Based on 141K signals)              ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Assets: ATOM, SUI, XRP                                       ║
-║  Strategy: Orderbook + RSI focus (best combo: +0.024% at 5m)  ║
-║  Exit: +1.5% TP | -0.8% SL | 180s time stop | Trailing stop   ║
-║  Data: strategy_signals, cvd, orderbook, indicators           ║
+║  Strategy: Orderbook ONLY (proven +0.012% at 5m)              ║
+║  Exit: +0.15% TP | -0.1% SL | 30s time | 1/5 conditions       ║
+║  Edge: 0.008-0.014% - match targets to real edge              ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
     main()
