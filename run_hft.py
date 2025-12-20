@@ -26,17 +26,18 @@ from hft_system.hft_bot import main
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       MICROSTRUCTURE BOT v3 (Liquidity Reaction Engine)       ║
+║       MICROSTRUCTURE BOT v4 (Liquidity Reaction Engine)       ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Entry: Orderbook imbalance >60% (1 condition only)           ║
 ║  Exits: TP +0.15% | SL -0.1% | Micro +0.05% on OB weaken      ║
 ║         OB Flip | Delta Negative | Spread 2x | No Movement    ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Trade Quality (TASK 6-7): Entry/Exit metrics, slippage       ║
-║  Trade Causality (TASK 8): WHY signals triggered              ║
-║  Edge Validation (TASK 9): Real vs Fake edge detection        ║
-║   - Tracks: time to MFE, OB decay, delta persistence          ║
-║   - real_edge_flag = 1 if edge > historical median            ║
+║  TASK 6-7: Trade Quality - Entry/Exit metrics, slippage       ║
+║  TASK 8: Trade Causality - WHY signals triggered              ║
+║  TASK 9: Edge Validation - Real vs Fake edge detection        ║
+║  TASK 10: Market Regime - WHICH context (5 regimes)           ║
+║   - low_vol_chop | high_vol_trend | mean_reversion            ║
+║   - liquidity_vacuum | news_spike                             ║
 ║  Expected: 2-20s trades, small consistent edge                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

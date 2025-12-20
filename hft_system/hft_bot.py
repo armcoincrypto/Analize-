@@ -73,6 +73,14 @@ class HFTBot:
         # TASK 6: Track entry conditions for quality metrics
         self.entry_conditions: dict = {}  # trade_id -> {flow, orderbook, signal_price}
 
+        # TASK 10: Market regime tracking
+        self.current_regime: dict = {}  # symbol -> regime type
+        self.regime_confidence: dict = {}  # symbol -> confidence
+        # Preferred regimes for trading (can be configured)
+        self.preferred_regimes = ["high_vol_trend", "mean_reversion"]
+        self.avoid_regimes = ["liquidity_vacuum", "news_spike"]
+        self.filter_by_regime = False  # Set True to skip signals in bad regimes
+
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
@@ -86,6 +94,12 @@ class HFTBot:
     async def _on_signal(self, signal):
         """Handle new signal from signal engine."""
         self.signals_generated += 1
+
+        # TASK 10: Check market regime filter
+        current_regime = self.current_regime.get(signal.symbol, "unknown")
+        if self.filter_by_regime and current_regime in self.avoid_regimes:
+            logger.info(f"Signal SKIPPED: {signal.symbol} - regime={current_regime} (avoided)")
+            return
 
         # Check risk
         risk_decision = self.risk_controller.check_risk(signal)
@@ -147,6 +161,11 @@ class HFTBot:
 
                 # Log primary cause in trade entry message
                 logger.info(f"  Primary cause: {primary_cause}")
+
+                # TASK 10: Log regime at entry
+                entry_regime = self.current_regime.get(signal.symbol, "unknown")
+                self.trade_logger.update_trade_regime(signal.symbol, entry_regime, is_entry=True)
+                logger.info(f"  Market regime: {entry_regime}")
         else:
             logger.info(f"Signal rejected: {signal.symbol} - {risk_decision.message}")
 
@@ -159,6 +178,10 @@ class HFTBot:
         mfe = self.execution_engine.position_mfe.get(result.symbol, 0)
         mae = self.execution_engine.position_mae.get(result.symbol, 0)
         self.trade_logger.log_trade_exit(result, mfe, mae)
+
+        # TASK 10: Log regime at exit (before status changes to closed)
+        exit_regime = self.current_regime.get(result.symbol, "unknown")
+        self.trade_logger.update_trade_regime(result.symbol, exit_regime, is_entry=False)
 
         # Log MICROSTRUCTURE trade flow at exit
         trade_id = f"{result.symbol}_{result.entry_time}"
@@ -275,6 +298,14 @@ class HFTBot:
                 if scan_count % 10 == 0:
                     self.trade_logger.batch_commit()
 
+                # TASK 10: Classify market regime every 30 scans (30 seconds)
+                if scan_count % 30 == 0:
+                    for symbol in SYSTEM_CONFIG.enabled_assets:
+                        regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                        self.current_regime[symbol] = regime
+                        self.regime_confidence[symbol] = confidence
+                        self.trade_logger.log_market_regime(symbol, regime, metrics, confidence)
+
                 await asyncio.sleep(1)  # Scan every second
 
             except Exception as e:
@@ -315,7 +346,8 @@ class HFTBot:
             signal = self.signal_engine.check_all_conditions(symbol)
             triggered = [c.name[:6] for c in signal.conditions if c.triggered]
             price = signal.entry_price
-            logger.info(f"    {symbol}: ${price:.4f} | {signal.conditions_met}/5 | {triggered}")
+            regime = self.current_regime.get(symbol, "unknown")
+            logger.info(f"    {symbol}: ${price:.4f} | {signal.conditions_met}/5 | {triggered} | regime={regime}")
 
         if positions:
             logger.info(f"  Open positions:")
@@ -456,6 +488,26 @@ class HFTBot:
                 for symbol, data in edge_stats["symbol_breakdown"].items():
                     logger.info(f"    {symbol}: {data['pct_real_edge']:.1f}% real | "
                                f"avg {data['avg_edge_duration']:.1f}s duration")
+
+        # TASK 10: Market regime analysis - WHICH market context
+        regime_stats = self.trade_logger.get_regime_stats()
+        if regime_stats.get("total_trades_with_regime", 0) > 0:
+            logger.info("-" * 60)
+            logger.info("MARKET REGIME ANALYSIS (which conditions work best)")
+
+            # Show performance by regime
+            if "regime_performance" in regime_stats and regime_stats["regime_performance"]:
+                logger.info("  Performance by regime:")
+                for regime, data in regime_stats["regime_performance"].items():
+                    logger.info(f"    {regime}: {data['trades']} trades | "
+                               f"avg PnL {data['avg_pnl_pct']:+.4f}% | "
+                               f"win rate {data['win_rate']:.1f}%")
+
+            # Show recent regime distribution
+            if "recent_regime_distribution" in regime_stats and regime_stats["recent_regime_distribution"]:
+                logger.info("  Recent regime distribution (last 1h):")
+                for regime, count in regime_stats["recent_regime_distribution"].items():
+                    logger.info(f"    {regime}: {count} samples")
 
         logger.info("=" * 60)
 

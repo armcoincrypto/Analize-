@@ -736,6 +736,151 @@ class WebSocketManager:
             "delta_1s": btc_delta_1s
         }
 
+    def classify_market_regime(self, symbol: str) -> tuple:
+        """
+        TASK 10: Classify market regime based on multiple factors.
+
+        Returns: (regime_type, confidence, metrics_dict)
+
+        Regime types:
+        - low_vol_chop: Low volatility, no trend, range-bound
+        - high_vol_trend: High volatility with directional move
+        - mean_reversion: Overextended price returning to mean
+        - liquidity_vacuum: Low depth, wide spreads, choppy
+        - news_spike: Sudden volume/volatility spike (>3x normal)
+        """
+        metrics = {}
+
+        # === 1. VOLATILITY METRICS ===
+        velocity_1m = abs(self.get_price_change(symbol, 60) or 0)
+        velocity_5m = abs(self.get_price_change(symbol, 300) or 0)
+        velocity_1s = abs(self.get_price_change(symbol, 1) or 0)
+
+        metrics["volatility_1m"] = velocity_1m
+        metrics["volatility_5m"] = velocity_5m
+
+        # Volatility ratio: recent vs longer term
+        if velocity_5m > 0:
+            metrics["volatility_ratio"] = velocity_1m / velocity_5m
+        else:
+            metrics["volatility_ratio"] = 1.0
+
+        # === 2. RANGE METRICS ===
+        exchange_symbol = get_asset_config(symbol).exchange_symbol
+        kline = self.kline_data.get(exchange_symbol)
+        if kline:
+            # Range expansion: current range vs typical
+            current_range = (kline.high - kline.low) / kline.open * 100 if kline.open > 0 else 0
+            metrics["range_expansion"] = current_range
+            metrics["range_compression"] = 1.0 / (current_range + 0.01)
+        else:
+            metrics["range_expansion"] = velocity_1m
+            metrics["range_compression"] = 0.5
+
+        # === 3. TREND METRICS ===
+        price_change_30s = self.get_price_change(symbol, 30) or 0
+        price_change_60s = self.get_price_change(symbol, 60) or 0
+
+        # Trend strength: are moves persistent?
+        if abs(price_change_60s) > 0.01:
+            if (price_change_30s > 0 and price_change_60s > 0) or \
+               (price_change_30s < 0 and price_change_60s < 0):
+                metrics["trend_strength"] = min(abs(price_change_60s) * 10, 1.0)
+                metrics["trend_direction"] = "up" if price_change_60s > 0 else "down"
+            else:
+                metrics["trend_strength"] = 0.2
+                metrics["trend_direction"] = "choppy"
+        else:
+            metrics["trend_strength"] = 0.0
+            metrics["trend_direction"] = "neutral"
+
+        # === 4. ORDERBOOK PATTERNS ===
+        orderbook = self.get_orderbook(symbol)
+        if orderbook:
+            imbalance = orderbook.imbalance_ratio
+            spread = orderbook.spread
+            depth = orderbook.bid_volume + orderbook.ask_volume
+
+            # Imbalance stability: how extreme is imbalance?
+            metrics["ob_imbalance_stability"] = 1.0 - abs(imbalance - 0.5) * 2
+            metrics["ob_depth_ratio"] = min(depth / 10000, 1.0)  # Normalize depth
+            metrics["spread_pct"] = spread
+        else:
+            metrics["ob_imbalance_stability"] = 0.5
+            metrics["ob_depth_ratio"] = 0.5
+            metrics["spread_pct"] = 0.1
+
+        # === 5. TRADE FLOW PATTERNS ===
+        trade_flow = self.get_trade_flow(symbol)
+        if trade_flow:
+            delta_1s = trade_flow.get("delta_1s", 0)
+            delta_3s = trade_flow.get("delta_3s", 0)
+            trades_per_sec = trade_flow.get("trades_per_second", 0)
+
+            # Flow consistency: is delta stable or flipping?
+            if delta_1s != 0 and delta_3s != 0:
+                if (delta_1s > 0 and delta_3s > 0) or (delta_1s < 0 and delta_3s < 0):
+                    metrics["flow_consistency"] = 0.8
+                else:
+                    metrics["flow_consistency"] = 0.2
+            else:
+                metrics["flow_consistency"] = 0.5
+
+            # Large trade ratio: spike detection
+            total_vol = trade_flow.get("aggressive_buy_vol", 0) + trade_flow.get("aggressive_sell_vol", 0)
+            metrics["large_trade_ratio"] = min(total_vol / 100000, 1.0)
+            metrics["trades_per_sec"] = trades_per_sec
+        else:
+            metrics["flow_consistency"] = 0.5
+            metrics["large_trade_ratio"] = 0.0
+            metrics["trades_per_sec"] = 0
+
+        # === REGIME CLASSIFICATION ===
+        regime = "unknown"
+        confidence = 0.5
+
+        vol_1m = metrics["volatility_1m"]
+        vol_ratio = metrics["volatility_ratio"]
+        trend = metrics["trend_strength"]
+        spread = metrics.get("spread_pct", 0.1)
+        depth = metrics["ob_depth_ratio"]
+        flow_consistency = metrics["flow_consistency"]
+
+        # NEWS_SPIKE: Sudden volume/volatility spike
+        if vol_ratio > 2.5 or metrics["large_trade_ratio"] > 0.7:
+            regime = "news_spike"
+            confidence = min(vol_ratio / 3, 1.0)
+
+        # HIGH_VOL_TREND: High volatility with directional move
+        elif vol_1m > 0.15 and trend > 0.5 and flow_consistency > 0.6:
+            regime = "high_vol_trend"
+            confidence = min((trend + flow_consistency) / 2, 1.0)
+
+        # LIQUIDITY_VACUUM: Low depth, wide spreads
+        elif spread > 0.05 or depth < 0.3:
+            regime = "liquidity_vacuum"
+            confidence = max(spread / 0.1, 1 - depth)
+
+        # MEAN_REVERSION: Overextended price, flow reversing
+        elif vol_1m > 0.1 and flow_consistency < 0.3:
+            regime = "mean_reversion"
+            confidence = 1.0 - flow_consistency
+
+        # LOW_VOL_CHOP: Low volatility, no trend
+        elif vol_1m < 0.08 and trend < 0.3:
+            regime = "low_vol_chop"
+            confidence = 1.0 - max(vol_1m / 0.08, trend / 0.3)
+
+        # Default: classify by volatility
+        else:
+            if vol_1m > 0.1:
+                regime = "high_vol_trend" if trend > 0.4 else "mean_reversion"
+            else:
+                regime = "low_vol_chop"
+            confidence = 0.4
+
+        return regime, confidence, metrics
+
     def get_connection_stats(self) -> dict:
         """Get connection statistics."""
         now = time.time()

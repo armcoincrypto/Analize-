@@ -376,6 +376,52 @@ class TradeLogger:
             )
         """)
 
+        # TASK 10: Market regime classification - WHICH market context
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_regime (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+
+                -- Volatility metrics
+                volatility_1m REAL,
+                volatility_5m REAL,
+                volatility_ratio REAL,
+
+                -- Range metrics
+                range_expansion REAL,
+                range_compression REAL,
+
+                -- Trend metrics
+                trend_strength REAL,
+                trend_direction TEXT,
+
+                -- Orderbook patterns
+                ob_imbalance_stability REAL,
+                ob_depth_ratio REAL,
+
+                -- Trade flow patterns
+                flow_consistency REAL,
+                large_trade_ratio REAL,
+
+                -- Regime classification
+                regime TEXT NOT NULL,
+                regime_confidence REAL,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Add regime columns to trades table if not exists
+        try:
+            cursor.execute("ALTER TABLE trades ADD COLUMN regime_at_entry TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE trades ADD COLUMN regime_at_exit TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -397,6 +443,9 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_edge_trade_id ON trade_edge(trade_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_edge_symbol ON trade_edge(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_edge_real_flag ON trade_edge(real_edge_flag)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_regime_timestamp ON market_regime(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_regime_symbol ON market_regime(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_regime_regime ON market_regime(regime)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -1494,6 +1543,145 @@ class TradeLogger:
             "exit_reasons": exit_reasons,
             "per_symbol": per_symbol
         }
+
+    def log_market_regime(
+        self,
+        symbol: str,
+        regime: str,
+        metrics: dict,
+        confidence: float = 0.5
+    ):
+        """
+        TASK 10: Log market regime classification.
+
+        Regime types:
+        - low_vol_chop: Low volatility, no trend, range-bound
+        - high_vol_trend: High volatility with directional move
+        - mean_reversion: Overextended price returning to mean
+        - liquidity_vacuum: Low depth, wide spreads, choppy
+        - news_spike: Sudden volume/volatility spike
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO market_regime (
+                    timestamp, symbol,
+                    volatility_1m, volatility_5m, volatility_ratio,
+                    range_expansion, range_compression,
+                    trend_strength, trend_direction,
+                    ob_imbalance_stability, ob_depth_ratio,
+                    flow_consistency, large_trade_ratio,
+                    regime, regime_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                metrics.get("volatility_1m", 0),
+                metrics.get("volatility_5m", 0),
+                metrics.get("volatility_ratio", 0),
+                metrics.get("range_expansion", 0),
+                metrics.get("range_compression", 0),
+                metrics.get("trend_strength", 0),
+                metrics.get("trend_direction", "neutral"),
+                metrics.get("ob_imbalance_stability", 0),
+                metrics.get("ob_depth_ratio", 0),
+                metrics.get("flow_consistency", 0),
+                metrics.get("large_trade_ratio", 0),
+                regime,
+                confidence
+            ))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error logging market regime: {e}")
+
+    def get_current_regime(self, symbol: str) -> str:
+        """Get the most recent regime classification for a symbol."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT regime FROM market_regime
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (symbol,))
+            row = cursor.fetchone()
+            return row[0] if row else "unknown"
+        except Exception as e:
+            logger.error(f"Error getting current regime: {e}")
+            return "unknown"
+
+    def update_trade_regime(self, symbol: str, regime: str, is_entry: bool = True):
+        """Update regime at entry or exit for the open trade."""
+        try:
+            cursor = self.conn.cursor()
+            column = "regime_at_entry" if is_entry else "regime_at_exit"
+            cursor.execute(f"""
+                UPDATE trades
+                SET {column} = ?
+                WHERE symbol = ? AND status = 'open'
+            """, (regime, symbol))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error updating trade regime: {e}")
+
+    def get_regime_stats(self) -> Dict:
+        """
+        TASK 10: Get aggregate regime statistics.
+
+        Returns:
+        - Distribution of trades by regime
+        - PnL by regime
+        - Which regimes are most profitable
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Get regime distribution and PnL
+            cursor.execute("""
+                SELECT
+                    regime_at_entry,
+                    COUNT(*) as trade_count,
+                    AVG(pnl_pct) as avg_pnl,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
+                FROM trades
+                WHERE status = 'closed' AND regime_at_entry IS NOT NULL
+                GROUP BY regime_at_entry
+                ORDER BY trade_count DESC
+            """)
+            regime_performance = {}
+            for row in cursor.fetchall():
+                regime_performance[row[0]] = {
+                    "trades": row[1],
+                    "avg_pnl_pct": round(row[2], 4) if row[2] else 0,
+                    "win_rate": round(row[3], 1) if row[3] else 0
+                }
+
+            # Get recent regime distribution (last 1 hour)
+            one_hour_ago = int((time.time() - 3600) * 1000)
+            cursor.execute("""
+                SELECT regime, COUNT(*) as count
+                FROM market_regime
+                WHERE timestamp > ?
+                GROUP BY regime
+                ORDER BY count DESC
+            """, (one_hour_ago,))
+            recent_regimes = {row[0]: row[1] for row in cursor.fetchall()}
+
+            # Total trades with regime data
+            cursor.execute("""
+                SELECT COUNT(*) FROM trades
+                WHERE status = 'closed' AND regime_at_entry IS NOT NULL
+            """)
+            total = cursor.fetchone()[0]
+
+            return {
+                "total_trades_with_regime": total,
+                "regime_performance": regime_performance,
+                "recent_regime_distribution": recent_regimes
+            }
+        except Exception as e:
+            logger.error(f"Error getting regime stats: {e}")
+            return {"error": str(e)}
 
     def close(self):
         """Close database connection."""
