@@ -342,6 +342,40 @@ class TradeLogger:
             )
         """)
 
+        # TASK 9: Trade edge validation - WHEN edge is real vs fake
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_edge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT UNIQUE NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+
+                -- Edge timing metrics
+                seconds_to_max_favorable REAL,
+                max_favorable_pct REAL,
+                seconds_to_ob_decay REAL,
+                ob_decay_amount REAL,
+                delta_persistence_sec REAL,
+
+                -- Entry state
+                entry_imbalance REAL,
+                entry_delta REAL,
+                entry_spread REAL,
+
+                -- Edge quality
+                edge_duration_sec REAL,
+                historical_median_edge_sec REAL,
+                real_edge_flag INTEGER DEFAULT 0,
+
+                -- Final outcome
+                final_pnl_pct REAL,
+                exit_reason TEXT,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (trade_id) REFERENCES trades(trade_id)
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -360,6 +394,9 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_quality_exit_reason ON trade_quality_metrics(exit_reason)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_causality_trade_id ON trade_causality(trade_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_causality_cause ON trade_causality(primary_cause)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_edge_trade_id ON trade_edge(trade_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_edge_symbol ON trade_edge(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_edge_real_flag ON trade_edge(real_edge_flag)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -979,6 +1016,188 @@ class TradeLogger:
             }
         except Exception as e:
             logger.error(f"Error getting causality stats: {e}")
+            return {"error": str(e)}
+
+    def get_historical_median_edge(self, symbol: str) -> float:
+        """Get historical median edge duration for symbol."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT edge_duration_sec
+                FROM trade_edge
+                WHERE symbol = ? AND edge_duration_sec > 0
+                ORDER BY edge_duration_sec
+            """, (symbol,))
+            rows = cursor.fetchall()
+
+            if not rows:
+                return 3.0  # Default 3 seconds if no history
+
+            # Calculate median
+            n = len(rows)
+            mid = n // 2
+            if n % 2 == 0:
+                return (rows[mid - 1][0] + rows[mid][0]) / 2
+            else:
+                return rows[mid][0]
+        except Exception as e:
+            logger.error(f"Error getting historical median edge: {e}")
+            return 3.0
+
+    def log_trade_edge(
+        self,
+        trade_id: str,
+        symbol: str,
+        side: str,
+        seconds_to_max_favorable: float,
+        max_favorable_pct: float,
+        seconds_to_ob_decay: float,
+        ob_decay_amount: float,
+        delta_persistence_sec: float,
+        entry_imbalance: float,
+        entry_delta: float,
+        entry_spread: float,
+        edge_duration_sec: float,
+        final_pnl_pct: float,
+        exit_reason: str
+    ):
+        """
+        TASK 9: Log edge validation metrics.
+
+        Determines if this trade had a real edge or fake edge:
+        - real_edge_flag = 1 if edge_duration > historical median
+        """
+        try:
+            # Get historical median for this symbol
+            historical_median = self.get_historical_median_edge(symbol)
+
+            # Determine if edge was real
+            real_edge_flag = 1 if edge_duration_sec > historical_median else 0
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO trade_edge (
+                    trade_id, symbol, side,
+                    seconds_to_max_favorable, max_favorable_pct,
+                    seconds_to_ob_decay, ob_decay_amount, delta_persistence_sec,
+                    entry_imbalance, entry_delta, entry_spread,
+                    edge_duration_sec, historical_median_edge_sec, real_edge_flag,
+                    final_pnl_pct, exit_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_id,
+                symbol,
+                side,
+                seconds_to_max_favorable,
+                max_favorable_pct,
+                seconds_to_ob_decay,
+                ob_decay_amount,
+                delta_persistence_sec,
+                entry_imbalance,
+                entry_delta,
+                entry_spread,
+                edge_duration_sec,
+                historical_median,
+                real_edge_flag,
+                final_pnl_pct,
+                exit_reason
+            ))
+            self.conn.commit()
+
+            edge_status = "REAL" if real_edge_flag else "FAKE"
+            logger.info(
+                f"Trade edge: {trade_id} -> {edge_status} edge | "
+                f"Duration: {edge_duration_sec:.1f}s (median: {historical_median:.1f}s)"
+            )
+            return real_edge_flag
+        except Exception as e:
+            logger.error(f"Error logging trade edge: {e}")
+            return 0
+
+    def get_edge_stats(self) -> Dict:
+        """
+        TASK 9: Get aggregate edge validation statistics.
+
+        Returns:
+        - % of signals with real edge
+        - Average edge duration
+        - Edge decay patterns
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Get overall stats
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total_trades,
+                    SUM(real_edge_flag) as real_edge_count,
+                    AVG(edge_duration_sec) as avg_edge_duration,
+                    AVG(seconds_to_max_favorable) as avg_time_to_max,
+                    AVG(max_favorable_pct) as avg_max_favorable,
+                    AVG(seconds_to_ob_decay) as avg_ob_decay_time,
+                    AVG(delta_persistence_sec) as avg_delta_persistence
+                FROM trade_edge
+            """)
+            row = cursor.fetchone()
+
+            if not row or row[0] == 0:
+                return {"message": "No edge data yet"}
+
+            total = row[0]
+            real_count = row[1] or 0
+            pct_real_edge = (real_count / total * 100) if total > 0 else 0
+
+            # Get per-symbol breakdown
+            cursor.execute("""
+                SELECT
+                    symbol,
+                    COUNT(*) as trades,
+                    SUM(real_edge_flag) * 100.0 / COUNT(*) as pct_real,
+                    AVG(edge_duration_sec) as avg_duration
+                FROM trade_edge
+                GROUP BY symbol
+                ORDER BY trades DESC
+            """)
+            symbol_breakdown = {
+                r[0]: {
+                    "trades": r[1],
+                    "pct_real_edge": round(r[2], 1) if r[2] else 0,
+                    "avg_edge_duration": round(r[3], 2) if r[3] else 0
+                }
+                for r in cursor.fetchall()
+            }
+
+            # Get real vs fake edge PnL comparison
+            cursor.execute("""
+                SELECT
+                    real_edge_flag,
+                    AVG(final_pnl_pct) as avg_pnl,
+                    COUNT(*) as count
+                FROM trade_edge
+                GROUP BY real_edge_flag
+            """)
+            edge_pnl = {}
+            for r in cursor.fetchall():
+                edge_type = "real" if r[0] == 1 else "fake"
+                edge_pnl[edge_type] = {
+                    "avg_pnl_pct": round(r[1], 4) if r[1] else 0,
+                    "count": r[2]
+                }
+
+            return {
+                "total_trades": total,
+                "pct_real_edge": round(pct_real_edge, 1),
+                "pct_fake_edge": round(100 - pct_real_edge, 1),
+                "avg_edge_duration_sec": round(row[2], 2) if row[2] else 0,
+                "avg_time_to_max_favorable_sec": round(row[3], 2) if row[3] else 0,
+                "avg_max_favorable_pct": round(row[4], 4) if row[4] else 0,
+                "avg_ob_decay_time_sec": round(row[5], 2) if row[5] else 0,
+                "avg_delta_persistence_sec": round(row[6], 2) if row[6] else 0,
+                "symbol_breakdown": symbol_breakdown,
+                "edge_pnl_comparison": edge_pnl
+            }
+        except Exception as e:
+            logger.error(f"Error getting edge stats: {e}")
             return {"error": str(e)}
 
     def get_microstructure_stats(self) -> Dict:

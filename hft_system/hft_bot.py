@@ -197,6 +197,26 @@ class HFTBot:
                 actual_exit_price=result.exit_price
             )
 
+        # TASK 9: Log edge validation metrics
+        edge_data = self.execution_engine.get_edge_data(trade_id)
+        if edge_data:
+            self.trade_logger.log_trade_edge(
+                trade_id=trade_id,
+                symbol=result.symbol,
+                side=edge_data.get("side", "unknown"),
+                seconds_to_max_favorable=edge_data.get("seconds_to_max_favorable", 0),
+                max_favorable_pct=edge_data.get("max_favorable_pct", 0),
+                seconds_to_ob_decay=edge_data.get("seconds_to_ob_decay", 0),
+                ob_decay_amount=edge_data.get("ob_decay_amount", 0),
+                delta_persistence_sec=edge_data.get("delta_persistence_sec", 0),
+                entry_imbalance=edge_data.get("entry_imbalance", 0),
+                entry_delta=edge_data.get("entry_delta", 0),
+                entry_spread=edge_data.get("entry_spread", 0),
+                edge_duration_sec=edge_data.get("edge_duration_sec", 0),
+                final_pnl_pct=result.pnl_pct,
+                exit_reason=result.reason.value
+            )
+
     async def _signal_scan_loop(self):
         """Periodically scan for signals."""
         # Wait for WebSocket data to populate
@@ -315,6 +335,19 @@ class HFTBot:
                        f"Costs: {micro_stats['avg_total_cost_pct']:.4f}%")
             if "evaluation" in micro_stats:
                 logger.info(f"    {micro_stats['evaluation']}")
+
+        # TASK 9: Edge validation stats
+        edge_stats = self.trade_logger.get_edge_stats()
+        if "total_trades" in edge_stats and edge_stats["total_trades"] > 0:
+            logger.info("  EDGE VALIDATION:")
+            logger.info(f"    Real Edge: {edge_stats['pct_real_edge']:.1f}% | "
+                       f"Fake Edge: {edge_stats['pct_fake_edge']:.1f}%")
+            logger.info(f"    Avg Edge Duration: {edge_stats['avg_edge_duration_sec']:.1f}s | "
+                       f"Time to MFE: {edge_stats['avg_time_to_max_favorable_sec']:.1f}s")
+            if "edge_pnl_comparison" in edge_stats:
+                real_pnl = edge_stats["edge_pnl_comparison"].get("real", {}).get("avg_pnl_pct", 0)
+                fake_pnl = edge_stats["edge_pnl_comparison"].get("fake", {}).get("avg_pnl_pct", 0)
+                logger.info(f"    Real Edge Avg PnL: {real_pnl:+.4f}% | Fake Edge Avg PnL: {fake_pnl:+.4f}%")
         logger.info("=" * 60)
 
     async def start(self):
@@ -396,6 +429,33 @@ class HFTBot:
             logger.info("TRADE CAUSALITY (WHY signals triggered)")
             for cause, data in causality_stats["cause_breakdown"].items():
                 logger.info(f"  {cause}: {data['count']} trades (strength: {data['avg_strength']:.4f})")
+
+        # TASK 9: Edge validation - WHEN edge is real vs fake
+        edge_stats = self.trade_logger.get_edge_stats()
+        if "total_trades" in edge_stats and edge_stats["total_trades"] > 0:
+            logger.info("-" * 60)
+            logger.info("EDGE VALIDATION (real vs fake signals)")
+            logger.info(f"  Real edge: {edge_stats['pct_real_edge']:.1f}%")
+            logger.info(f"  Fake edge: {edge_stats['pct_fake_edge']:.1f}%")
+            logger.info(f"  Avg edge duration: {edge_stats['avg_edge_duration_sec']:.1f}s")
+            logger.info(f"  Avg time to max favorable: {edge_stats['avg_time_to_max_favorable_sec']:.1f}s")
+            logger.info(f"  Avg OB decay time: {edge_stats['avg_ob_decay_time_sec']:.1f}s")
+            logger.info(f"  Avg delta persistence: {edge_stats['avg_delta_persistence_sec']:.1f}s")
+
+            # Show PnL comparison between real and fake edge trades
+            if "edge_pnl_comparison" in edge_stats:
+                pnl_comp = edge_stats["edge_pnl_comparison"]
+                if "real" in pnl_comp:
+                    logger.info(f"  Real edge trades: {pnl_comp['real']['count']} @ avg {pnl_comp['real']['avg_pnl_pct']:+.4f}%")
+                if "fake" in pnl_comp:
+                    logger.info(f"  Fake edge trades: {pnl_comp['fake']['count']} @ avg {pnl_comp['fake']['avg_pnl_pct']:+.4f}%")
+
+            # Show per-symbol breakdown
+            if "symbol_breakdown" in edge_stats and edge_stats["symbol_breakdown"]:
+                logger.info("  Per-symbol edge quality:")
+                for symbol, data in edge_stats["symbol_breakdown"].items():
+                    logger.info(f"    {symbol}: {data['pct_real_edge']:.1f}% real | "
+                               f"avg {data['avg_edge_duration']:.1f}s duration")
 
         logger.info("=" * 60)
 

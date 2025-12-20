@@ -32,10 +32,11 @@ if __name__ == "__main__":
 ║  Exits: TP +0.15% | SL -0.1% | Micro +0.05% on OB weaken      ║
 ║         OB Flip | Delta Negative | Spread 2x | No Movement    ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Trade Quality Metrics (TASK 6 & 7):                          ║
-║  - Entry/Exit imbalance, spread, buy/sell ratio tracked       ║
-║  - Slippage + cost tracking per trade                         ║
-║  - Avg PnL, Exit Speed, Invalidation % (not win rate!)        ║
+║  Trade Quality (TASK 6-7): Entry/Exit metrics, slippage       ║
+║  Trade Causality (TASK 8): WHY signals triggered              ║
+║  Edge Validation (TASK 9): Real vs Fake edge detection        ║
+║   - Tracks: time to MFE, OB decay, delta persistence          ║
+║   - real_edge_flag = 1 if edge > historical median            ║
 ║  Expected: 2-20s trades, small consistent edge                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

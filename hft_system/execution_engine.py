@@ -109,6 +109,14 @@ class ExecutionEngine:
         self.entry_price_check: Dict[str, float] = {} # Price at 3s for movement check
         self.entry_check_time: Dict[str, float] = {}  # Time of 3s check
 
+        # TASK 9: Edge validation tracking
+        self.time_of_mfe: Dict[str, float] = {}       # Time when MFE was reached
+        self.time_of_ob_decay: Dict[str, float] = {}  # Time when OB imbalance decayed
+        self.time_of_delta_flip: Dict[str, float] = {}  # Time when delta turned against us
+        self.ob_decay_amount: Dict[str, float] = {}   # How much OB decayed
+        self.entry_time: Dict[str, float] = {}        # Entry time for edge duration calc
+        self.exit_edge_data: Dict[str, Dict] = {}     # Captured edge data at exit for callback
+
         logger.info(f"ExecutionEngine initialized in {self.mode.value} mode")
 
     async def execute_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
@@ -170,6 +178,13 @@ class ExecutionEngine:
         self.entry_delta[signal.symbol] = trade_flow.get("net_delta", 0)
         self.entry_price_check[signal.symbol] = fill_price  # Will check movement after 3s
         self.entry_check_time[signal.symbol] = 0  # Not checked yet
+
+        # TASK 9: Initialize edge tracking
+        self.entry_time[signal.symbol] = time.time()
+        self.time_of_mfe[signal.symbol] = 0  # Will be set when MFE is updated
+        self.time_of_ob_decay[signal.symbol] = 0  # Will be set when OB decays
+        self.time_of_delta_flip[signal.symbol] = 0  # Will be set when delta flips
+        self.ob_decay_amount[signal.symbol] = 0
 
         result = TradeResult(
             success=True,
@@ -241,10 +256,47 @@ class ExecutionEngine:
         if position.symbol in self.position_mfe:
             if pnl_pct > self.position_mfe[position.symbol]:
                 self.position_mfe[position.symbol] = pnl_pct
+                # TASK 9: Record time of MFE (max favorable excursion)
+                if position.symbol in self.entry_time:
+                    self.time_of_mfe[position.symbol] = time.time() - self.entry_time[position.symbol]
             if pnl_pct < self.position_mae[position.symbol]:
                 self.position_mae[position.symbol] = pnl_pct
 
         hold_time = (time.time() * 1000 - position.entry_time) / 1000
+
+        # TASK 9: Track OB decay and delta flip for edge validation
+        orderbook = self.ws.get_orderbook(position.symbol)
+        trade_flow = self.ws.get_trade_flow(position.symbol)
+
+        if orderbook and position.symbol in self.entry_imbalance:
+            current_imbalance = orderbook.imbalance_ratio
+            entry_imbalance = self.entry_imbalance[position.symbol]
+
+            # Track OB decay (first time imbalance drops significantly)
+            if self.time_of_ob_decay.get(position.symbol, 0) == 0:
+                if position.side == SignalType.LONG:
+                    decay = entry_imbalance - current_imbalance
+                    if decay > 0.1:  # Lost 10%+ of edge
+                        self.time_of_ob_decay[position.symbol] = time.time() - self.entry_time.get(position.symbol, time.time())
+                        self.ob_decay_amount[position.symbol] = decay
+                else:
+                    decay = current_imbalance - entry_imbalance
+                    if decay > 0.1:
+                        self.time_of_ob_decay[position.symbol] = time.time() - self.entry_time.get(position.symbol, time.time())
+                        self.ob_decay_amount[position.symbol] = decay
+
+        if trade_flow and position.symbol in self.entry_delta:
+            current_delta = trade_flow.get("delta_1s", 0)
+            entry_delta = self.entry_delta[position.symbol]
+
+            # Track delta flip (first time delta turns against us)
+            if self.time_of_delta_flip.get(position.symbol, 0) == 0:
+                if position.side == SignalType.LONG:
+                    if entry_delta > 0 and current_delta < 0:
+                        self.time_of_delta_flip[position.symbol] = time.time() - self.entry_time.get(position.symbol, time.time())
+                else:
+                    if entry_delta < 0 and current_delta > 0:
+                        self.time_of_delta_flip[position.symbol] = time.time() - self.entry_time.get(position.symbol, time.time())
 
         # 1. Check Take Profit
         if pnl_pct >= config.take_profit_pct:
@@ -452,12 +504,44 @@ class ExecutionEngine:
         mfe = self.position_mfe.pop(position.symbol, 0)
         mae = self.position_mae.pop(position.symbol, 0)
 
+        # TASK 9: Capture edge metrics before cleanup
+        trade_id = f"{position.symbol}_{position.entry_time}"
+        entry_time_val = self.entry_time.get(position.symbol, time.time())
+        edge_duration = time.time() - entry_time_val
+
+        # Compute delta persistence: time delta stayed favorable (before flip or exit)
+        delta_flip_time = self.time_of_delta_flip.get(position.symbol, 0)
+        if delta_flip_time > 0:
+            delta_persistence = delta_flip_time
+        else:
+            delta_persistence = hold_time  # Delta never flipped, persisted entire trade
+
+        self.exit_edge_data[trade_id] = {
+            "seconds_to_max_favorable": self.time_of_mfe.get(position.symbol, 0),
+            "max_favorable_pct": mfe,
+            "seconds_to_ob_decay": self.time_of_ob_decay.get(position.symbol, 0),
+            "ob_decay_amount": self.ob_decay_amount.get(position.symbol, 0),
+            "delta_persistence_sec": delta_persistence,
+            "entry_imbalance": self.entry_imbalance.get(position.symbol, 0),
+            "entry_delta": self.entry_delta.get(position.symbol, 0),
+            "entry_spread": self.entry_spread.get(position.symbol, 0),
+            "edge_duration_sec": edge_duration,
+            "side": position.side.value
+        }
+
         # Clean up entry tracking data
         self.entry_spread.pop(position.symbol, None)
         self.entry_imbalance.pop(position.symbol, None)
         self.entry_delta.pop(position.symbol, None)
         self.entry_price_check.pop(position.symbol, None)
         self.entry_check_time.pop(position.symbol, None)
+
+        # Clean up edge tracking data
+        self.time_of_mfe.pop(position.symbol, None)
+        self.time_of_ob_decay.pop(position.symbol, None)
+        self.time_of_delta_flip.pop(position.symbol, None)
+        self.ob_decay_amount.pop(position.symbol, None)
+        self.entry_time.pop(position.symbol, None)
 
         # Close in risk controller
         self.risk.close_position(position.symbol, fill_price, reason.value)
@@ -517,6 +601,10 @@ class ExecutionEngine:
             await self.execute_exit(position.symbol, ExitReason.EMERGENCY)
 
         logger.critical(f"Emergency close all: {len(positions)} positions closed - {reason}")
+
+    def get_edge_data(self, trade_id: str) -> Optional[Dict]:
+        """Get captured edge data for a trade and remove from cache."""
+        return self.exit_edge_data.pop(trade_id, None)
 
     def get_open_positions_status(self) -> Dict:
         """Get status of all open positions."""
