@@ -51,7 +51,11 @@ class ConditionResult:
 
 @dataclass
 class Signal:
-    """Complete signal with all condition results."""
+    """
+    Complete signal with all condition results.
+
+    MICROSTRUCTURE: Entry validity based on ORDERBOOK ONLY.
+    """
     symbol: str
     signal_type: SignalType
     conditions_met: int
@@ -63,7 +67,13 @@ class Signal:
 
     @property
     def is_valid(self) -> bool:
-        return self.conditions_met >= SYSTEM_CONFIG.min_entry_conditions
+        """Entry valid ONLY when orderbook imbalance triggered."""
+        # Check if orderbook_imbalance condition was triggered
+        orderbook_triggered = any(
+            c.name == "orderbook_imbalance" and c.triggered
+            for c in self.conditions
+        )
+        return orderbook_triggered and self.signal_type != SignalType.NONE
 
 
 class RSICalculator:
@@ -378,47 +388,53 @@ class SignalEngine:
 
     def check_all_conditions(self, symbol: str) -> Signal:
         """
-        Check all 5 conditions for a symbol and generate signal.
+        MICROSTRUCTURE ENTRY - Orderbook imbalance ONLY.
 
-        Returns Signal with all condition results.
-        Entry is valid if 3+ conditions are met.
+        Based on 141K signal analysis:
+        - Orderbook alone: +0.012% at 5m (BEST)
+        - RSI adds NO value - removed from entry decision
+        - More conditions = worse performance
+
+        Entry triggers ONLY on orderbook imbalance.
+        Other conditions logged for data collection only.
         """
         config = get_asset_config(symbol)
         conditions = []
 
-        # Check all 5 conditions
+        # Check orderbook FIRST - this is the ONLY entry condition
+        orderbook_cond = self.check_orderbook_imbalance(symbol, config)
+        conditions.append(orderbook_cond)
+
+        # Log other conditions for data collection (NOT used for entry)
         conditions.append(self.check_price_movement(symbol, config))
         conditions.append(self.check_volume_spike(symbol, config))
-        conditions.append(self.check_orderbook_imbalance(symbol, config))
         conditions.append(self.check_derivatives_signal(symbol, config))
-        conditions.append(self.check_micro_indicator(symbol, config))
+        # RSI removed from entry logic - proven to add no value
+        # conditions.append(self.check_micro_indicator(symbol, config))
 
-        # Count triggered conditions
+        # ENTRY DECISION: Orderbook imbalance ONLY
+        orderbook_triggered = orderbook_cond.triggered
+
+        # Count for logging purposes
         triggered = [c for c in conditions if c.triggered]
         conditions_met = len(triggered)
 
-        # MICROSTRUCTURE: Orderbook ALONE is best (141K signal analysis)
-        # RSI adds NO value - only use orderbook imbalance
-        orderbook_triggered = any(c.name == "orderbook_imbalance" and c.triggered for c in conditions)
-
-        # Determine signal direction from triggered conditions
-        long_votes = sum(1 for c in triggered if c.direction == SignalType.LONG)
-        short_votes = sum(1 for c in triggered if c.direction == SignalType.SHORT)
-
-        if long_votes > short_votes:
-            signal_type = SignalType.LONG
-        elif short_votes > long_votes:
-            signal_type = SignalType.SHORT
+        # Signal direction from orderbook imbalance
+        if orderbook_triggered:
+            signal_type = orderbook_cond.direction
         else:
             signal_type = SignalType.NONE
 
         # Get current price
         current_price = self.ws.get_current_price(symbol) or 0
 
-        # Calculate confidence - BOOST for Orderbook alone (proven best)
-        confidence = conditions_met / len(conditions)
+        # Confidence based on orderbook strength
         if orderbook_triggered:
-            confidence = min(1.0, confidence + 0.3)  # 30% boost for orderbook
+            # Orderbook imbalance value is between 0-1, higher = stronger
+            imbalance = orderbook_cond.value
+            confidence = abs(imbalance - 0.5) * 2  # Convert to 0-1 scale
+        else:
+            confidence = 0
 
         signal = Signal(
             symbol=symbol,
