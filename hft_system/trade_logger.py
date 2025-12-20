@@ -422,6 +422,38 @@ class TradeLogger:
         except sqlite3.OperationalError:
             pass  # Column already exists
 
+        # TASK 11: Blocked signals - No-Trade Zone detection
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                entry_price REAL,
+
+                -- Block reason details
+                block_reason TEXT NOT NULL,
+                block_details TEXT,
+
+                -- Market conditions at block time
+                spread_pct REAL,
+                spread_change_1s REAL,
+                delta_variance REAL,
+                ob_volume_instability REAL,
+                liquidity_depth REAL,
+
+                -- What would have happened
+                price_after_5s REAL,
+                price_after_10s REAL,
+                would_have_pnl REAL,
+
+                -- Regime at block time
+                regime TEXT,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -446,6 +478,9 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_regime_timestamp ON market_regime(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_regime_symbol ON market_regime(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_regime_regime ON market_regime(regime)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_blocked_signals_timestamp ON blocked_signals(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_blocked_signals_symbol ON blocked_signals(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_blocked_signals_reason ON blocked_signals(block_reason)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -1681,6 +1716,148 @@ class TradeLogger:
             }
         except Exception as e:
             logger.error(f"Error getting regime stats: {e}")
+            return {"error": str(e)}
+
+    def log_blocked_signal(
+        self,
+        symbol: str,
+        signal_type: str,
+        entry_price: float,
+        block_reason: str,
+        block_details: str,
+        market_conditions: dict,
+        regime: str = "unknown"
+    ):
+        """
+        TASK 11: Log a signal that was blocked by no-trade zone detection.
+
+        Block reasons:
+        - spread_unstable: Spread changed >X% in 1s
+        - delta_noise: Delta variance too high
+        - ob_unstable: Top5 OB volume unstable
+        - low_liquidity: Depth below minimum threshold
+        - regime_avoided: Blocked due to bad regime
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO blocked_signals (
+                    timestamp, symbol, signal_type, entry_price,
+                    block_reason, block_details,
+                    spread_pct, spread_change_1s, delta_variance,
+                    ob_volume_instability, liquidity_depth, regime
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                signal_type,
+                entry_price,
+                block_reason,
+                block_details,
+                market_conditions.get("spread_pct", 0),
+                market_conditions.get("spread_change_1s", 0),
+                market_conditions.get("delta_variance", 0),
+                market_conditions.get("ob_volume_instability", 0),
+                market_conditions.get("liquidity_depth", 0),
+                regime
+            ))
+            self.conn.commit()
+            logger.debug(f"Blocked signal logged: {symbol} - {block_reason}")
+        except Exception as e:
+            logger.error(f"Error logging blocked signal: {e}")
+
+    def update_blocked_signal_outcome(self, symbol: str, timestamp_ms: int,
+                                       price_after_5s: float, price_after_10s: float,
+                                       would_have_pnl: float):
+        """Update blocked signal with what would have happened."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE blocked_signals
+                SET price_after_5s = ?, price_after_10s = ?, would_have_pnl = ?
+                WHERE symbol = ? AND timestamp = ?
+            """, (price_after_5s, price_after_10s, would_have_pnl, symbol, timestamp_ms))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error updating blocked signal outcome: {e}")
+
+    def get_blocked_signal_stats(self) -> Dict:
+        """
+        TASK 11: Get statistics on blocked signals.
+
+        Returns:
+        - Total blocked signals
+        - Block reason breakdown
+        - Estimated savings (if would_have_pnl is tracked)
+        - % of signals blocked
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Get total blocked and breakdown by reason
+            cursor.execute("""
+                SELECT
+                    block_reason,
+                    COUNT(*) as count,
+                    AVG(would_have_pnl) as avg_would_have_pnl
+                FROM blocked_signals
+                GROUP BY block_reason
+                ORDER BY count DESC
+            """)
+            reason_breakdown = {}
+            total_blocked = 0
+            total_saved = 0
+            for row in cursor.fetchall():
+                reason_breakdown[row[0]] = {
+                    "count": row[1],
+                    "avg_would_have_pnl": round(row[2], 4) if row[2] else None
+                }
+                total_blocked += row[1]
+                if row[2] and row[2] < 0:
+                    total_saved += abs(row[2]) * row[1]
+
+            # Get total signals (executed + blocked)
+            cursor.execute("SELECT COUNT(*) FROM signals")
+            total_signals = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM blocked_signals")
+            blocked_count = cursor.fetchone()[0]
+
+            # Calculate block rate
+            block_rate = (blocked_count / (total_signals + blocked_count) * 100) if (total_signals + blocked_count) > 0 else 0
+
+            # Get per-symbol breakdown
+            cursor.execute("""
+                SELECT symbol, COUNT(*) as count
+                FROM blocked_signals
+                GROUP BY symbol
+                ORDER BY count DESC
+            """)
+            symbol_breakdown = {row[0]: row[1] for row in cursor.fetchall()}
+
+            # Calculate estimated savings from blocking bad trades
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as bad_blocks,
+                    AVG(would_have_pnl) as avg_loss_avoided
+                FROM blocked_signals
+                WHERE would_have_pnl < 0
+            """)
+            row = cursor.fetchone()
+            bad_blocks = row[0] if row[0] else 0
+            avg_loss_avoided = row[1] if row[1] else 0
+
+            return {
+                "total_blocked": total_blocked,
+                "block_rate_pct": round(block_rate, 1),
+                "reason_breakdown": reason_breakdown,
+                "symbol_breakdown": symbol_breakdown,
+                "bad_trades_avoided": bad_blocks,
+                "avg_loss_avoided_pct": round(avg_loss_avoided, 4) if avg_loss_avoided else 0,
+                "estimated_savings_pct": round(total_saved, 4)
+            }
+        except Exception as e:
+            logger.error(f"Error getting blocked signal stats: {e}")
             return {"error": str(e)}
 
     def close(self):

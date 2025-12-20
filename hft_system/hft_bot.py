@@ -81,6 +81,10 @@ class HFTBot:
         self.avoid_regimes = ["liquidity_vacuum", "news_spike"]
         self.filter_by_regime = False  # Set True to skip signals in bad regimes
 
+        # TASK 11: No-trade zone tracking
+        self.enable_no_trade_zones = True  # Set False to disable blocking
+        self.signals_blocked = 0
+
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
@@ -99,7 +103,39 @@ class HFTBot:
         current_regime = self.current_regime.get(signal.symbol, "unknown")
         if self.filter_by_regime and current_regime in self.avoid_regimes:
             logger.info(f"Signal SKIPPED: {signal.symbol} - regime={current_regime} (avoided)")
+            # Log as blocked signal with regime reason
+            market_conditions = {"spread_pct": 0, "spread_change_1s": 0,
+                                "delta_variance": 0, "ob_volume_instability": 0, "liquidity_depth": 0}
+            self.trade_logger.log_blocked_signal(
+                symbol=signal.symbol,
+                signal_type=signal.signal_type.value,
+                entry_price=signal.entry_price,
+                block_reason="regime_avoided",
+                block_details=f"Avoided regime: {current_regime}",
+                market_conditions=market_conditions,
+                regime=current_regime
+            )
+            self.signals_blocked += 1
             return
+
+        # TASK 11: Check no-trade zone before entry
+        if self.enable_no_trade_zones:
+            is_blocked, block_reason, block_details, market_conditions = \
+                self.ws_manager.detect_no_trade_zone(signal.symbol)
+
+            if is_blocked:
+                logger.info(f"NO-TRADE ZONE: {signal.symbol} - {block_reason}: {block_details}")
+                self.trade_logger.log_blocked_signal(
+                    symbol=signal.symbol,
+                    signal_type=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    block_reason=block_reason,
+                    block_details=block_details,
+                    market_conditions=market_conditions,
+                    regime=current_regime
+                )
+                self.signals_blocked += 1
+                return
 
         # Check risk
         risk_decision = self.risk_controller.check_risk(signal)
@@ -331,7 +367,7 @@ class HFTBot:
 
         logger.info("=" * 60)
         logger.info(f"STATUS UPDATE | Uptime: {uptime:.1f}h")
-        logger.info(f"  Signals: {self.signals_generated} | Trades: {self.trades_executed}")
+        logger.info(f"  Signals: {self.signals_generated} | Trades: {self.trades_executed} | Blocked: {self.signals_blocked}")
         logger.info(f"  Capital: ${risk_status['capital']['current']:,.2f} "
                    f"(Daily PnL: ${risk_status['capital']['daily_pnl']:+,.2f})")
         logger.info(f"  Daily: {risk_status['daily_stats']['wins']}W / "
@@ -380,6 +416,16 @@ class HFTBot:
                 real_pnl = edge_stats["edge_pnl_comparison"].get("real", {}).get("avg_pnl_pct", 0)
                 fake_pnl = edge_stats["edge_pnl_comparison"].get("fake", {}).get("avg_pnl_pct", 0)
                 logger.info(f"    Real Edge Avg PnL: {real_pnl:+.4f}% | Fake Edge Avg PnL: {fake_pnl:+.4f}%")
+
+        # TASK 11: No-trade zone / blocked signal stats
+        if self.signals_blocked > 0:
+            blocked_stats = self.trade_logger.get_blocked_signal_stats()
+            logger.info("  NO-TRADE ZONE STATS:")
+            logger.info(f"    Blocked: {blocked_stats.get('total_blocked', 0)} | "
+                       f"Block Rate: {blocked_stats.get('block_rate_pct', 0):.1f}%")
+            if blocked_stats.get("reason_breakdown"):
+                reasons = [f"{k}: {v['count']}" for k, v in blocked_stats["reason_breakdown"].items()]
+                logger.info(f"    Reasons: {', '.join(reasons)}")
         logger.info("=" * 60)
 
     async def start(self):
@@ -508,6 +554,27 @@ class HFTBot:
                 logger.info("  Recent regime distribution (last 1h):")
                 for regime, count in regime_stats["recent_regime_distribution"].items():
                     logger.info(f"    {regime}: {count} samples")
+
+        # TASK 11: No-trade zone analysis - WHEN NOT to trade
+        blocked_stats = self.trade_logger.get_blocked_signal_stats()
+        if blocked_stats.get("total_blocked", 0) > 0:
+            logger.info("-" * 60)
+            logger.info("NO-TRADE ZONE ANALYSIS (blocked signals)")
+            logger.info(f"  Total blocked: {blocked_stats['total_blocked']}")
+            logger.info(f"  Block rate: {blocked_stats['block_rate_pct']:.1f}%")
+
+            # Show breakdown by reason
+            if "reason_breakdown" in blocked_stats and blocked_stats["reason_breakdown"]:
+                logger.info("  Block reasons:")
+                for reason, data in blocked_stats["reason_breakdown"].items():
+                    pnl_str = f" (would have been {data['avg_would_have_pnl']:+.4f}%)" if data["avg_would_have_pnl"] else ""
+                    logger.info(f"    {reason}: {data['count']} signals{pnl_str}")
+
+            # Show estimated savings
+            if blocked_stats.get("bad_trades_avoided", 0) > 0:
+                logger.info(f"  Bad trades avoided: {blocked_stats['bad_trades_avoided']}")
+                logger.info(f"  Avg loss avoided: {blocked_stats['avg_loss_avoided_pct']:+.4f}%")
+                logger.info(f"  Estimated total savings: {blocked_stats['estimated_savings_pct']:+.4f}%")
 
         logger.info("=" * 60)
 

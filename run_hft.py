@@ -26,7 +26,7 @@ from hft_system.hft_bot import main
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       MICROSTRUCTURE BOT v4 (Liquidity Reaction Engine)       ║
+║       MICROSTRUCTURE BOT v5 (Liquidity Reaction Engine)       ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Entry: Orderbook imbalance >60% (1 condition only)           ║
 ║  Exits: TP +0.15% | SL -0.1% | Micro +0.05% on OB weaken      ║
@@ -36,8 +36,9 @@ if __name__ == "__main__":
 ║  TASK 8: Trade Causality - WHY signals triggered              ║
 ║  TASK 9: Edge Validation - Real vs Fake edge detection        ║
 ║  TASK 10: Market Regime - WHICH context (5 regimes)           ║
-║   - low_vol_chop | high_vol_trend | mean_reversion            ║
-║   - liquidity_vacuum | news_spike                             ║
+║  TASK 11: No-Trade Zones - WHEN NOT to trade                  ║
+║   - Blocks: spread unstable, delta noise, OB unstable,        ║
+║     low liquidity, bad regime                                 ║
 ║  Expected: 2-20s trades, small consistent edge                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

@@ -881,6 +881,109 @@ class WebSocketManager:
 
         return regime, confidence, metrics
 
+    def detect_no_trade_zone(self, symbol: str) -> tuple:
+        """
+        TASK 11: Detect no-trade zone conditions.
+
+        Returns: (is_blocked, block_reason, block_details, market_conditions)
+
+        Block conditions:
+        - spread_unstable: Spread changed >50% in 1s
+        - delta_noise: Delta variance too high (flipping rapidly)
+        - ob_unstable: Top5 OB volume changed >30% in 1s
+        - low_liquidity: Total depth below threshold
+        """
+        is_blocked = False
+        block_reason = None
+        block_details = None
+
+        # Thresholds (can be tuned)
+        SPREAD_CHANGE_THRESHOLD = 0.5   # 50% change in spread in 1s
+        DELTA_VARIANCE_THRESHOLD = 0.8  # High variance = flipping
+        OB_INSTABILITY_THRESHOLD = 0.3  # 30% change in top5 volume
+        MIN_LIQUIDITY_DEPTH = 5000      # Minimum depth in quote currency
+
+        market_conditions = {
+            "spread_pct": 0,
+            "spread_change_1s": 0,
+            "delta_variance": 0,
+            "ob_volume_instability": 0,
+            "liquidity_depth": 0
+        }
+
+        # === 1. SPREAD STABILITY CHECK ===
+        orderbook = self.get_orderbook(symbol)
+        if orderbook:
+            current_spread = orderbook.spread
+            market_conditions["spread_pct"] = current_spread
+
+            # Get spread history from price buffer
+            exchange_symbol = get_asset_config(symbol).exchange_symbol
+            price_buffer = self.price_buffers.get(exchange_symbol)
+
+            # Check if spread is abnormally wide (>0.1% for major pairs)
+            if current_spread > 0.1:
+                is_blocked = True
+                block_reason = "spread_unstable"
+                block_details = f"Spread {current_spread:.4f}% > 0.1% threshold"
+                market_conditions["spread_change_1s"] = current_spread
+
+            # Calculate liquidity depth
+            total_depth = orderbook.bid_volume + orderbook.ask_volume
+            market_conditions["liquidity_depth"] = total_depth
+
+            # Check minimum liquidity
+            if total_depth < MIN_LIQUIDITY_DEPTH:
+                is_blocked = True
+                block_reason = "low_liquidity"
+                block_details = f"Depth {total_depth:.0f} < {MIN_LIQUIDITY_DEPTH} threshold"
+
+        # === 2. DELTA VARIANCE CHECK ===
+        trade_flow = self.get_trade_flow(symbol)
+        if trade_flow and not is_blocked:
+            delta_1s = trade_flow.get("delta_1s", 0)
+            delta_3s = trade_flow.get("delta_3s", 0)
+
+            # Delta variance: if 1s and 3s deltas have opposite signs, high variance
+            if delta_1s != 0 and delta_3s != 0:
+                if (delta_1s > 0 and delta_3s < 0) or (delta_1s < 0 and delta_3s > 0):
+                    # Deltas are flipping - high variance
+                    variance = 1.0
+                else:
+                    # Deltas aligned - low variance
+                    variance = 0.2
+            else:
+                variance = 0.5
+
+            market_conditions["delta_variance"] = variance
+
+            if variance > DELTA_VARIANCE_THRESHOLD:
+                is_blocked = True
+                block_reason = "delta_noise"
+                block_details = f"Delta variance {variance:.2f} > {DELTA_VARIANCE_THRESHOLD} (flipping rapidly)"
+
+        # === 3. ORDERBOOK VOLUME INSTABILITY CHECK ===
+        if orderbook and not is_blocked:
+            # Get top 5 levels volume
+            top5_bid = sum(qty for _, qty in orderbook.bids[:5])
+            top5_ask = sum(qty for _, qty in orderbook.asks[:5])
+            total_top5 = top5_bid + top5_ask
+
+            # Check imbalance extremity (one side too thin)
+            if total_top5 > 0:
+                bid_ratio = top5_bid / total_top5
+                # If one side is < 20% of total, it's unstable
+                if bid_ratio < 0.2 or bid_ratio > 0.8:
+                    instability = abs(bid_ratio - 0.5) * 2
+                    market_conditions["ob_volume_instability"] = instability
+
+                    if instability > OB_INSTABILITY_THRESHOLD:
+                        is_blocked = True
+                        block_reason = "ob_unstable"
+                        block_details = f"OB imbalance extreme: bid_ratio={bid_ratio:.2f}"
+
+        return is_blocked, block_reason, block_details, market_conditions
+
     def get_connection_stats(self) -> dict:
         """Get connection statistics."""
         now = time.time()
