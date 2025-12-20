@@ -97,6 +97,19 @@ class HFTBot:
             if result.success:
                 self.trades_executed += 1
                 self.trade_logger.log_trade_entry(result, signal)
+
+                # Log MICROSTRUCTURE trade flow at entry
+                trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"
+                trade_flow = self.ws_manager.get_trade_flow(signal.symbol)
+                orderbook = self.ws_manager.get_orderbook(signal.symbol)
+                self.trade_logger.log_trade_entry_flow(
+                    trade_id=trade_id,
+                    symbol=signal.symbol,
+                    trade_flow=trade_flow,
+                    orderbook_imbalance=orderbook.imbalance_ratio if orderbook else None,
+                    spread_pct=orderbook.spread if orderbook else None,
+                    snapshot_type="entry"
+                )
         else:
             logger.info(f"Signal rejected: {signal.symbol} - {risk_decision.message}")
 
@@ -109,6 +122,19 @@ class HFTBot:
         mfe = self.execution_engine.position_mfe.get(result.symbol, 0)
         mae = self.execution_engine.position_mae.get(result.symbol, 0)
         self.trade_logger.log_trade_exit(result, mfe, mae)
+
+        # Log MICROSTRUCTURE trade flow at exit
+        trade_id = f"{result.symbol}_{result.entry_time}"
+        trade_flow = self.ws_manager.get_trade_flow(result.symbol)
+        orderbook = self.ws_manager.get_orderbook(result.symbol)
+        self.trade_logger.log_trade_entry_flow(
+            trade_id=trade_id,
+            symbol=result.symbol,
+            trade_flow=trade_flow,
+            orderbook_imbalance=orderbook.imbalance_ratio if orderbook else None,
+            spread_pct=orderbook.spread if orderbook else None,
+            snapshot_type="exit"
+        )
 
     async def _signal_scan_loop(self):
         """Periodically scan for signals."""

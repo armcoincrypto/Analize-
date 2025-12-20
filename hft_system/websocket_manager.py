@@ -100,48 +100,108 @@ class MarkPriceData:
     timestamp: int
 
 
-class CVDBuffer:
+class TradeFlowBuffer:
     """
-    Cumulative Volume Delta tracker.
+    MICROSTRUCTURE Trade Flow Tracker.
 
-    CVD = cumulative (buy volume - sell volume)
-    Positive = buying pressure, Negative = selling pressure
+    Tracks aggressive order flow for entry/exit decisions:
+    - Aggressive buy volume (market buys hitting asks)
+    - Aggressive sell volume (market sells hitting bids)
+    - Trades per second
+    - Net delta over rolling 1s and 3s windows
 
     is_buyer_maker=True means seller was aggressor (selling pressure)
     is_buyer_maker=False means buyer was aggressor (buying pressure)
     """
 
     def __init__(self, max_size: int = 10000):
-        self.trades: deque = deque(maxlen=max_size)  # (timestamp, volume, is_buy)
+        self.trades: deque = deque(maxlen=max_size)  # (timestamp_ms, volume, is_buy, price)
 
-    def add_trade(self, timestamp: int, volume: float, is_buyer_maker: bool):
+    def add_trade(self, timestamp: int, volume: float, price: float, is_buyer_maker: bool):
         """Add a trade. is_buyer_maker=False means buyer was aggressor."""
         is_buy = not is_buyer_maker  # Buyer aggressor = buy
-        self.trades.append((timestamp, volume, is_buy))
+        self.trades.append((timestamp, volume, is_buy, price))
 
-    def get_cvd(self, window_sec: int) -> dict:
-        """Get CVD stats for the last N seconds."""
+    def get_trade_flow(self, window_ms: int = 1000) -> dict:
+        """
+        Get trade flow stats for microstructure analysis.
+
+        Returns:
+            aggressive_buy_vol: Volume from market buys
+            aggressive_sell_vol: Volume from market sells
+            trades_per_second: Number of trades in window
+            net_delta: buy_vol - sell_vol
+            delta_pct: net_delta as % of total volume
+        """
         if not self.trades:
-            return {"cvd": 0, "buy_volume": 0, "sell_volume": 0}
+            return {
+                "aggressive_buy_vol": 0,
+                "aggressive_sell_vol": 0,
+                "trades_per_second": 0,
+                "net_delta": 0,
+                "delta_pct": 0,
+                "trade_count": 0
+            }
 
         now = self.trades[-1][0]
-        cutoff = now - (window_sec * 1000)
+        cutoff = now - window_ms
 
         buy_vol = 0
         sell_vol = 0
+        trade_count = 0
 
-        for ts, vol, is_buy in self.trades:
+        for ts, vol, is_buy, price in self.trades:
             if ts >= cutoff:
+                trade_count += 1
                 if is_buy:
                     buy_vol += vol
                 else:
                     sell_vol += vol
 
+        total_vol = buy_vol + sell_vol
+        net_delta = buy_vol - sell_vol
+        delta_pct = (net_delta / total_vol * 100) if total_vol > 0 else 0
+        trades_per_sec = trade_count / (window_ms / 1000)
+
         return {
-            "cvd": buy_vol - sell_vol,
-            "buy_volume": buy_vol,
-            "sell_volume": sell_vol
+            "aggressive_buy_vol": buy_vol,
+            "aggressive_sell_vol": sell_vol,
+            "trades_per_second": trades_per_sec,
+            "net_delta": net_delta,
+            "delta_pct": delta_pct,
+            "trade_count": trade_count
         }
+
+    def get_delta_1s(self) -> float:
+        """Net delta over last 1 second."""
+        flow = self.get_trade_flow(1000)
+        return flow["net_delta"]
+
+    def get_delta_3s(self) -> float:
+        """Net delta over last 3 seconds."""
+        flow = self.get_trade_flow(3000)
+        return flow["net_delta"]
+
+    def is_delta_negative(self, window_ms: int = 1000) -> bool:
+        """Check if trade flow is against buyers."""
+        return self.get_trade_flow(window_ms)["net_delta"] < 0
+
+    def is_delta_positive(self, window_ms: int = 1000) -> bool:
+        """Check if trade flow favors buyers."""
+        return self.get_trade_flow(window_ms)["net_delta"] > 0
+
+    def get_cvd(self, window_sec: int) -> dict:
+        """Get CVD stats (backward compatible)."""
+        flow = self.get_trade_flow(window_sec * 1000)
+        return {
+            "cvd": flow["net_delta"],
+            "buy_volume": flow["aggressive_buy_vol"],
+            "sell_volume": flow["aggressive_sell_vol"]
+        }
+
+
+# Backward compatibility alias
+CVDBuffer = TradeFlowBuffer
 
 
 class PriceBuffer:
@@ -407,11 +467,12 @@ class WebSocketManager:
                 trade.timestamp
             )
 
-        # Update CVD buffer
+        # Update CVD/TradeFlow buffer
         if symbol in self.cvd_buffers:
             self.cvd_buffers[symbol].add_trade(
                 trade.timestamp,
                 trade.quantity * trade.price,  # Volume in quote currency
+                trade.price,  # Price for weighted analysis
                 trade.is_buyer_maker
             )
 
@@ -546,6 +607,43 @@ class WebSocketManager:
         return {
             "cvd_1m": 0, "cvd_5m": 0, "cvd_15m": 0,
             "buy_volume_1m": 0, "sell_volume_1m": 0
+        }
+
+    def get_trade_flow(self, symbol: str, window_ms: int = 1000) -> dict:
+        """
+        Get MICROSTRUCTURE trade flow data for symbol.
+
+        Returns:
+            aggressive_buy_vol: Volume from market buys (hitting asks)
+            aggressive_sell_vol: Volume from market sells (hitting bids)
+            trades_per_second: Number of trades in window
+            net_delta: buy_vol - sell_vol
+            delta_pct: net_delta as % of total volume
+            delta_1s: Net delta over 1 second
+            delta_3s: Net delta over 3 seconds
+        """
+        exchange_symbol = get_asset_config(symbol).exchange_symbol
+        buffer = self.cvd_buffers.get(exchange_symbol)
+
+        if buffer:
+            flow = buffer.get_trade_flow(window_ms)
+            flow["delta_1s"] = buffer.get_delta_1s()
+            flow["delta_3s"] = buffer.get_delta_3s()
+            flow["is_delta_negative"] = buffer.is_delta_negative(window_ms)
+            flow["is_delta_positive"] = buffer.is_delta_positive(window_ms)
+            return flow
+
+        return {
+            "aggressive_buy_vol": 0,
+            "aggressive_sell_vol": 0,
+            "trades_per_second": 0,
+            "net_delta": 0,
+            "delta_pct": 0,
+            "trade_count": 0,
+            "delta_1s": 0,
+            "delta_3s": 0,
+            "is_delta_negative": False,
+            "is_delta_positive": False
         }
 
     def get_connection_stats(self) -> dict:

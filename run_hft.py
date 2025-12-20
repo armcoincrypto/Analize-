@@ -26,12 +26,13 @@ from hft_system.hft_bot import main
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       MICROSTRUCTURE BOT (Based on 141K signals)              ║
+║       MICROSTRUCTURE BOT v2 (Event-Based Exits)               ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Assets: ATOM, SUI, XRP                                       ║
-║  Strategy: Orderbook ONLY (proven +0.012% at 5m)              ║
-║  Exit: +0.15% TP | -0.1% SL | 30s time | 1/5 conditions       ║
-║  Edge: 0.008-0.014% - match targets to real edge              ║
+║  Entry: Orderbook imbalance >60% (1 condition only)           ║
+║  Exits: TP +0.15% | SL -0.1% | Micro +0.05% on OB weaken      ║
+║         OB Flip | Delta Negative | Spread 2x | No Movement    ║
+║  Trade Flow: Aggressive buy/sell, delta 1s/3s tracking        ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
     main()

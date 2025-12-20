@@ -235,6 +235,28 @@ class TradeLogger:
             )
         """)
 
+        # Trade entry flow - MICROSTRUCTURE: capture trade flow at entry/exit for analysis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_entry_flow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT NOT NULL,
+                snapshot_type TEXT DEFAULT 'entry',
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                aggressive_buy_vol REAL,
+                aggressive_sell_vol REAL,
+                trades_per_second REAL,
+                net_delta REAL,
+                delta_pct REAL,
+                delta_1s REAL,
+                delta_3s REAL,
+                trade_count INTEGER,
+                orderbook_imbalance REAL,
+                spread_pct REAL,
+                FOREIGN KEY (trade_id) REFERENCES trades(trade_id)
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -248,6 +270,7 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_flow_timestamp ON trade_flow(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_flow_symbol ON trade_flow(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cvd_timestamp ON cvd_snapshots(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_entry_flow_trade_id ON trade_entry_flow(trade_id)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -581,6 +604,56 @@ class TradeLogger:
             ))
         except Exception as e:
             pass  # Silent fail
+
+    def log_trade_entry_flow(
+        self,
+        trade_id: str,
+        symbol: str,
+        trade_flow: dict,
+        orderbook_imbalance: float = None,
+        spread_pct: float = None,
+        snapshot_type: str = "entry"
+    ):
+        """
+        Log MICROSTRUCTURE trade flow snapshot at entry or exit.
+
+        Links trade flow data to specific trade for analysis:
+        - aggressive_buy_vol: Market buys hitting asks
+        - aggressive_sell_vol: Market sells hitting bids
+        - trades_per_second: Trading activity
+        - net_delta: buy - sell volume
+        - delta_1s, delta_3s: Short-term momentum
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO trade_entry_flow (
+                    trade_id, snapshot_type, timestamp, symbol,
+                    aggressive_buy_vol, aggressive_sell_vol,
+                    trades_per_second, net_delta, delta_pct,
+                    delta_1s, delta_3s, trade_count,
+                    orderbook_imbalance, spread_pct
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_id,
+                snapshot_type,
+                int(time.time() * 1000),
+                symbol,
+                trade_flow.get("aggressive_buy_vol", 0),
+                trade_flow.get("aggressive_sell_vol", 0),
+                trade_flow.get("trades_per_second", 0),
+                trade_flow.get("net_delta", 0),
+                trade_flow.get("delta_pct", 0),
+                trade_flow.get("delta_1s", 0),
+                trade_flow.get("delta_3s", 0),
+                trade_flow.get("trade_count", 0),
+                orderbook_imbalance,
+                spread_pct
+            ))
+            self.conn.commit()
+            logger.debug(f"Trade flow logged for {trade_id}: delta={trade_flow.get('net_delta', 0):.2f}")
+        except Exception as e:
+            logger.error(f"Error logging trade entry flow: {e}")
 
     def _update_daily_stats(self):
         """Update daily statistics."""
