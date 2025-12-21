@@ -767,7 +767,7 @@ class WebSocketManager:
 
         # === 2. RANGE METRICS ===
         exchange_symbol = get_asset_config(symbol).exchange_symbol
-        kline = self.kline_data.get(exchange_symbol)
+        kline = self.latest_klines.get(exchange_symbol)
         if kline:
             # Range expansion: current range vs typical
             current_range = (kline.high - kline.low) / kline.open * 100 if kline.open > 0 else 0
