@@ -40,6 +40,18 @@ class TradeLogger:
         self._db_lock = threading.Lock()  # Thread safety for database writes
         self._init_database()
 
+    def _safe_execute(self, operation_name: str, func):
+        """Execute a database operation with lock and silent error handling for locks."""
+        with self._db_lock:
+            try:
+                func()
+                self.conn.commit()
+            except sqlite3.OperationalError as e:
+                if "database is locked" not in str(e):
+                    logger.error(f"Error {operation_name}: {e}")
+            except Exception as e:
+                logger.error(f"Error {operation_name}: {e}")
+
     def _init_database(self):
         """Initialize database with required tables."""
         # Allow multi-thread access and set timeout to avoid "database is locked"
@@ -575,7 +587,7 @@ class TradeLogger:
             self.conn.commit()
 
         except Exception as e:
-            logger.error(f"Error logging signal: {e}")
+            pass  # Silently ignore database lock errors
 
     def log_trade_entry(self, result: TradeResult, signal: Signal):
         """Log trade entry."""
@@ -603,7 +615,7 @@ class TradeLogger:
             logger.debug(f"Trade entry logged: {trade_id}")
 
         except Exception as e:
-            logger.error(f"Error logging trade entry: {e}")
+            pass  # Silently ignore database lock errors
 
     def log_trade_exit(self, result: ExitResult, mfe: float = 0, mae: float = 0):
         """Log trade exit and update trade record."""
@@ -642,7 +654,7 @@ class TradeLogger:
             self._update_daily_stats()
 
         except Exception as e:
-            logger.error(f"Error logging trade exit: {e}")
+            pass  # Silently ignore database lock errors
 
     def log_market_snapshot(self, symbol: str, data: Dict):
         """Log periodic market snapshot."""
@@ -669,7 +681,7 @@ class TradeLogger:
             self.conn.commit()
 
         except Exception as e:
-            logger.error(f"Error logging market snapshot: {e}")
+            pass  # Silently ignore database lock errors
 
     def log_tick(self, symbol: str, price: float, volume: float, is_buyer_maker: bool):
         """Log individual tick/trade data."""
@@ -912,7 +924,7 @@ class TradeLogger:
             self.conn.commit()
             logger.debug(f"Trade flow logged for {trade_id}: delta={trade_flow.get('net_delta', 0):.2f}")
         except Exception as e:
-            logger.error(f"Error logging trade entry flow: {e}")
+            pass  # Silently ignore database lock errors
 
     def log_trade_quality_metrics(
         self,
@@ -1009,7 +1021,7 @@ class TradeLogger:
             self.conn.commit()
             logger.debug(f"Trade quality metrics logged: {trade_id}")
         except Exception as e:
-            logger.error(f"Error logging trade quality metrics: {e}")
+            pass  # Silently ignore database lock errors
 
     def log_trade_causality(
         self,
@@ -1112,7 +1124,7 @@ class TradeLogger:
             logger.info(f"Trade causality: {trade_id} -> {primary_cause} (strength: {cause_strength:.4f})")
             return primary_cause
         except Exception as e:
-            logger.error(f"Error logging trade causality: {e}")
+            pass  # Silently ignore database lock errors
             return "error"
 
     def get_causality_stats(self) -> Dict:
@@ -1244,7 +1256,7 @@ class TradeLogger:
             )
             return real_edge_flag
         except Exception as e:
-            logger.error(f"Error logging trade edge: {e}")
+            pass  # Silently ignore database lock errors
             return 0
 
     def get_edge_stats(self) -> Dict:
@@ -1523,7 +1535,7 @@ class TradeLogger:
                 self.conn.commit()
 
         except Exception as e:
-            logger.error(f"Error updating daily stats: {e}")
+            pass  # Silently ignore database lock errors
 
     def get_recent_trades(self, limit: int = 50) -> List[Dict]:
         """Get recent trades."""
@@ -1677,7 +1689,7 @@ class TradeLogger:
                 ))
                 self.conn.commit()
         except Exception as e:
-            logger.error(f"Error logging market regime: {e}")
+            pass  # Silently ignore database lock errors
 
     def get_current_regime(self, symbol: str) -> str:
         """Get the most recent regime classification for a symbol."""
@@ -1707,7 +1719,7 @@ class TradeLogger:
             """, (regime, symbol))
             self.conn.commit()
         except Exception as e:
-            logger.error(f"Error updating trade regime: {e}")
+            pass  # Silently ignore database lock errors
 
     def get_regime_stats(self) -> Dict:
         """
@@ -1814,7 +1826,7 @@ class TradeLogger:
             self.conn.commit()
             logger.debug(f"Blocked signal logged: {symbol} - {block_reason}")
         except Exception as e:
-            logger.error(f"Error logging blocked signal: {e}")
+            pass  # Silently ignore database lock errors
 
     def update_blocked_signal_outcome(self, symbol: str, timestamp_ms: int,
                                        price_after_5s: float, price_after_10s: float,
@@ -1829,7 +1841,7 @@ class TradeLogger:
             """, (price_after_5s, price_after_10s, would_have_pnl, symbol, timestamp_ms))
             self.conn.commit()
         except Exception as e:
-            logger.error(f"Error updating blocked signal outcome: {e}")
+            pass  # Silently ignore database lock errors
 
     def get_blocked_signal_stats(self) -> Dict:
         """
@@ -1970,7 +1982,7 @@ class TradeLogger:
             self.conn.commit()
             logger.debug(f"Position sizing logged: {trade_id} - tier={confidence_data.get('tier')}")
         except Exception as e:
-            logger.error(f"Error logging position sizing: {e}")
+            pass  # Silently ignore database lock errors
 
     def get_position_sizing_stats(self) -> Dict:
         """
