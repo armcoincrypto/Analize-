@@ -371,6 +371,20 @@ class HFTBot:
         logger.info("Waiting 30s for WebSocket data to populate...")
         await asyncio.sleep(30)
 
+        # TASK 10: Initialize market regime classification for all assets
+        logger.info("Initializing market regime classification...")
+        for symbol in SYSTEM_CONFIG.enabled_assets:
+            try:
+                regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                self.current_regime[symbol] = regime
+                self.regime_confidence[symbol] = confidence
+                self.trade_logger.log_market_regime(symbol, regime, metrics, confidence)
+                logger.info(f"  {symbol}: regime={regime} (confidence={confidence:.2f})")
+            except Exception as e:
+                logger.warning(f"  {symbol}: Failed to classify regime: {e}")
+                self.current_regime[symbol] = "unknown"
+                self.regime_confidence[symbol] = 0.0
+
         logger.info("Starting signal scan loop")
         scan_count = 0
 
@@ -426,10 +440,17 @@ class HFTBot:
                 # TASK 10: Classify market regime every 30 scans (30 seconds)
                 if scan_count % 30 == 0:
                     for symbol in SYSTEM_CONFIG.enabled_assets:
-                        regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
-                        self.current_regime[symbol] = regime
-                        self.regime_confidence[symbol] = confidence
-                        self.trade_logger.log_market_regime(symbol, regime, metrics, confidence)
+                        try:
+                            regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                            old_regime = self.current_regime.get(symbol, "unknown")
+                            self.current_regime[symbol] = regime
+                            self.regime_confidence[symbol] = confidence
+                            self.trade_logger.log_market_regime(symbol, regime, metrics, confidence)
+                            # Log regime changes
+                            if old_regime != regime:
+                                logger.info(f"REGIME CHANGE: {symbol} {old_regime} -> {regime} (conf={confidence:.2f})")
+                        except Exception as e:
+                            logger.warning(f"Regime classification failed for {symbol}: {e}")
 
                 await asyncio.sleep(1)  # Scan every second
 
