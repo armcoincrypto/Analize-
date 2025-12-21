@@ -378,7 +378,7 @@ class HFTBot:
                 regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
                 self.current_regime[symbol] = regime
                 self.regime_confidence[symbol] = confidence
-                self.trade_logger.log_market_regime(symbol, regime, metrics, confidence)
+                # Skip DB logging at startup - let the scan loop handle it
                 logger.info(f"  {symbol}: regime={regime} (confidence={confidence:.2f})")
             except Exception as e:
                 logger.warning(f"  {symbol}: Failed to classify regime: {e}")

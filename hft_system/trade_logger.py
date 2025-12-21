@@ -46,12 +46,14 @@ class TradeLogger:
         self.conn = sqlite3.connect(
             self.db_path,
             check_same_thread=False,
-            timeout=30.0  # Wait up to 30s for lock
+            timeout=5.0  # Shorter timeout - fail fast
         )
         self.conn.row_factory = sqlite3.Row
         # Enable WAL mode for better concurrency
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.execute("PRAGMA busy_timeout=5000")  # 5 second busy timeout
+        self.conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # Clear WAL at startup
 
         cursor = self.conn.cursor()
 
