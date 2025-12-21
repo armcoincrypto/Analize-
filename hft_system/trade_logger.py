@@ -14,6 +14,7 @@ import sqlite3
 import logging
 import time
 import json
+import threading
 from typing import Dict, Optional, List
 from datetime import datetime, date
 from pathlib import Path
@@ -36,6 +37,7 @@ class TradeLogger:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or SYSTEM_CONFIG.db_path
         self.conn = None
+        self._db_lock = threading.Lock()  # Thread safety for database writes
         self._init_database()
 
     def _init_database(self):
@@ -765,7 +767,8 @@ class TradeLogger:
     def batch_commit(self):
         """Commit batched writes (call periodically)."""
         try:
-            self.conn.commit()
+            with self._db_lock:
+                self.conn.commit()
         except Exception as e:
             logger.error(f"Error in batch commit: {e}")
 
@@ -1641,35 +1644,36 @@ class TradeLogger:
         - news_spike: Sudden volume/volatility spike
         """
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                INSERT INTO market_regime (
-                    timestamp, symbol,
-                    volatility_1m, volatility_5m, volatility_ratio,
-                    range_expansion, range_compression,
-                    trend_strength, trend_direction,
-                    ob_imbalance_stability, ob_depth_ratio,
-                    flow_consistency, large_trade_ratio,
-                    regime, regime_confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                int(time.time() * 1000),
-                symbol,
-                metrics.get("volatility_1m", 0),
-                metrics.get("volatility_5m", 0),
-                metrics.get("volatility_ratio", 0),
-                metrics.get("range_expansion", 0),
-                metrics.get("range_compression", 0),
-                metrics.get("trend_strength", 0),
-                metrics.get("trend_direction", "neutral"),
-                metrics.get("ob_imbalance_stability", 0),
-                metrics.get("ob_depth_ratio", 0),
-                metrics.get("flow_consistency", 0),
-                metrics.get("large_trade_ratio", 0),
-                regime,
-                confidence
-            ))
-            self.conn.commit()
+            with self._db_lock:  # Thread-safe database access
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    INSERT INTO market_regime (
+                        timestamp, symbol,
+                        volatility_1m, volatility_5m, volatility_ratio,
+                        range_expansion, range_compression,
+                        trend_strength, trend_direction,
+                        ob_imbalance_stability, ob_depth_ratio,
+                        flow_consistency, large_trade_ratio,
+                        regime, regime_confidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    int(time.time() * 1000),
+                    symbol,
+                    metrics.get("volatility_1m", 0),
+                    metrics.get("volatility_5m", 0),
+                    metrics.get("volatility_ratio", 0),
+                    metrics.get("range_expansion", 0),
+                    metrics.get("range_compression", 0),
+                    metrics.get("trend_strength", 0),
+                    metrics.get("trend_direction", "neutral"),
+                    metrics.get("ob_imbalance_stability", 0),
+                    metrics.get("ob_depth_ratio", 0),
+                    metrics.get("flow_consistency", 0),
+                    metrics.get("large_trade_ratio", 0),
+                    regime,
+                    confidence
+                ))
+                self.conn.commit()
         except Exception as e:
             logger.error(f"Error logging market regime: {e}")
 
