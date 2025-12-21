@@ -37,8 +37,9 @@ if __name__ == "__main__":
 ║  TASK 9: Edge Validation - Real vs Fake edge detection        ║
 ║  TASK 10: Market Regime - WHICH context (5 regimes)           ║
 ║  TASK 11: No-Trade Zones - WHEN NOT to trade                  ║
-║   - Blocks: spread unstable, delta noise, OB unstable,        ║
-║     low liquidity, bad regime                                 ║
+║  TASK 12: Adaptive Sizing - HOW MUCH based on confidence      ║
+║   - HIGH confidence: 1.5x size | MEDIUM: 1.0x | LOW: 0.5x     ║
+║   - Scores: Orderbook + Regime + Causality + Edge persistence ║
 ║  Expected: 2-20s trades, small consistent edge                ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

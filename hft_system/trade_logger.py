@@ -454,6 +454,47 @@ class TradeLogger:
             )
         """)
 
+        # TASK 12: Position sizing decisions - adaptive sizing log
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS position_sizing (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                trade_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+
+                -- Base sizing
+                base_position_pct REAL,
+                base_position_value REAL,
+                base_quantity REAL,
+
+                -- Confidence scoring
+                confidence_score REAL,
+                confidence_tier TEXT,
+                orderbook_score REAL,
+                regime_score REAL,
+                causality_score REAL,
+                edge_persistence_score REAL,
+
+                -- Adjusted sizing
+                size_multiplier REAL,
+                final_position_pct REAL,
+                final_position_value REAL,
+                final_quantity REAL,
+
+                -- Reasoning
+                adjustment_reason TEXT,
+                confidence_reasoning TEXT,
+
+                -- Context at decision time
+                regime TEXT,
+                orderbook_imbalance REAL,
+                spread_pct REAL,
+                primary_cause TEXT,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -481,6 +522,9 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_blocked_signals_timestamp ON blocked_signals(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_blocked_signals_symbol ON blocked_signals(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_blocked_signals_reason ON blocked_signals(block_reason)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_position_sizing_trade_id ON position_sizing(trade_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_position_sizing_symbol ON position_sizing(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_position_sizing_tier ON position_sizing(confidence_tier)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -1858,6 +1902,163 @@ class TradeLogger:
             }
         except Exception as e:
             logger.error(f"Error getting blocked signal stats: {e}")
+            return {"error": str(e)}
+
+    def log_position_sizing(
+        self,
+        trade_id: str,
+        symbol: str,
+        base_quantity: float,
+        base_value: float,
+        final_quantity: float,
+        final_value: float,
+        confidence_data: dict,
+        context_data: dict = None
+    ):
+        """
+        TASK 12: Log position sizing decision with confidence scoring.
+
+        Records both base sizing and confidence-adjusted final sizing
+        for analysis of adaptive sizing performance.
+        """
+        try:
+            context_data = context_data or {}
+            base_pct = (base_value / 10000) * 100  # Assume $10k capital
+            final_pct = (final_value / 10000) * 100
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO position_sizing (
+                    timestamp, trade_id, symbol,
+                    base_position_pct, base_position_value, base_quantity,
+                    confidence_score, confidence_tier,
+                    orderbook_score, regime_score, causality_score, edge_persistence_score,
+                    size_multiplier, final_position_pct, final_position_value, final_quantity,
+                    adjustment_reason, confidence_reasoning,
+                    regime, orderbook_imbalance, spread_pct, primary_cause
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                trade_id,
+                symbol,
+                round(base_pct, 4),
+                round(base_value, 2),
+                round(base_quantity, 6),
+                round(confidence_data.get("total_score", 0), 2),
+                confidence_data.get("tier", "unknown"),
+                round(confidence_data.get("orderbook_score", 0), 4),
+                round(confidence_data.get("regime_score", 0), 4),
+                round(confidence_data.get("causality_score", 0), 4),
+                round(confidence_data.get("edge_persistence_score", 0), 4),
+                round(confidence_data.get("size_multiplier", 1.0), 2),
+                round(final_pct, 4),
+                round(final_value, 2),
+                round(final_quantity, 6),
+                confidence_data.get("adjustment_reason", ""),
+                confidence_data.get("reasoning", ""),
+                context_data.get("regime", "unknown"),
+                round(context_data.get("orderbook_imbalance", 0), 4),
+                round(context_data.get("spread_pct", 0), 4),
+                context_data.get("primary_cause", "unknown")
+            ))
+            self.conn.commit()
+            logger.debug(f"Position sizing logged: {trade_id} - tier={confidence_data.get('tier')}")
+        except Exception as e:
+            logger.error(f"Error logging position sizing: {e}")
+
+    def get_position_sizing_stats(self) -> Dict:
+        """
+        TASK 12: Get aggregate position sizing statistics.
+
+        Returns:
+        - Tier distribution (HIGH/MEDIUM/LOW)
+        - Performance by tier (did HIGH confidence trades perform better?)
+        - Average sizing adjustments
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Get tier distribution
+            cursor.execute("""
+                SELECT
+                    confidence_tier,
+                    COUNT(*) as count,
+                    AVG(confidence_score) as avg_score,
+                    AVG(size_multiplier) as avg_multiplier
+                FROM position_sizing
+                GROUP BY confidence_tier
+                ORDER BY avg_score DESC
+            """)
+            tier_distribution = {}
+            for row in cursor.fetchall():
+                tier_distribution[row[0]] = {
+                    "count": row[1],
+                    "avg_score": round(row[2], 1) if row[2] else 0,
+                    "avg_multiplier": round(row[3], 2) if row[3] else 1.0
+                }
+
+            # Get performance by tier (join with trades table)
+            cursor.execute("""
+                SELECT
+                    ps.confidence_tier,
+                    COUNT(*) as trades,
+                    AVG(t.pnl_pct) as avg_pnl_pct,
+                    SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
+                FROM position_sizing ps
+                LEFT JOIN trades t ON ps.trade_id = t.trade_id
+                WHERE t.status = 'closed'
+                GROUP BY ps.confidence_tier
+                ORDER BY avg_pnl_pct DESC
+            """)
+            tier_performance = {}
+            for row in cursor.fetchall():
+                tier_performance[row[0]] = {
+                    "trades": row[1],
+                    "avg_pnl_pct": round(row[2], 4) if row[2] else 0,
+                    "win_rate": round(row[3], 1) if row[3] else 0
+                }
+
+            # Get component score analysis
+            cursor.execute("""
+                SELECT
+                    AVG(orderbook_score) as avg_ob,
+                    AVG(regime_score) as avg_regime,
+                    AVG(causality_score) as avg_causality,
+                    AVG(edge_persistence_score) as avg_edge
+                FROM position_sizing
+            """)
+            row = cursor.fetchone()
+            component_averages = {
+                "orderbook_score": round(row[0], 3) if row[0] else 0,
+                "regime_score": round(row[1], 3) if row[1] else 0,
+                "causality_score": round(row[2], 3) if row[2] else 0,
+                "edge_persistence_score": round(row[3], 3) if row[3] else 0
+            }
+
+            # Get sizing impact analysis
+            cursor.execute("""
+                SELECT
+                    AVG(base_position_value) as avg_base_value,
+                    AVG(final_position_value) as avg_final_value,
+                    AVG(size_multiplier) as avg_multiplier
+                FROM position_sizing
+            """)
+            row = cursor.fetchone()
+            sizing_summary = {
+                "avg_base_value": round(row[0], 2) if row[0] else 0,
+                "avg_final_value": round(row[1], 2) if row[1] else 0,
+                "avg_multiplier": round(row[2], 2) if row[2] else 1.0,
+                "avg_adjustment_pct": round((row[2] - 1) * 100, 1) if row[2] else 0
+            }
+
+            return {
+                "tier_distribution": tier_distribution,
+                "tier_performance": tier_performance,
+                "component_averages": component_averages,
+                "sizing_summary": sizing_summary
+            }
+        except Exception as e:
+            logger.error(f"Error getting position sizing stats: {e}")
             return {"error": str(e)}
 
     def close(self):

@@ -28,6 +28,40 @@ from .signal_engine import Signal, SignalType
 logger = logging.getLogger(__name__)
 
 
+# TASK 12: Confidence tiers for adaptive position sizing
+class ConfidenceTier(Enum):
+    """Confidence tier for position sizing."""
+    HIGH = "high"       # Strong edge - increase size
+    MEDIUM = "medium"   # Normal edge - base size
+    LOW = "low"         # Weak edge - reduce size
+    SKIP = "skip"       # No edge - don't trade
+
+
+@dataclass
+class ConfidenceScore:
+    """
+    TASK 12: Calculated confidence score for adaptive sizing.
+
+    Combines multiple factors:
+    - Orderbook strength: Imbalance magnitude
+    - Regime quality: Trending vs choppy
+    - Causality strength: Clear cause vs noise
+    - Edge persistence: Expected duration
+    """
+    total_score: float           # 0-100 composite score
+    tier: ConfidenceTier         # HIGH/MEDIUM/LOW/SKIP
+    size_multiplier: float       # 0.5x to 1.5x base size
+
+    # Component scores (0-1 each)
+    orderbook_score: float = 0.0
+    regime_score: float = 0.0
+    causality_score: float = 0.0
+    edge_persistence_score: float = 0.0
+
+    # Reasoning
+    reasoning: str = ""
+
+
 class RiskRejectReason(Enum):
     """Reasons for rejecting a trade."""
     APPROVED = "approved"
@@ -77,6 +111,10 @@ class RiskDecision:
     message: str
     position_size: float = 0.0
     position_value: float = 0.0
+    # TASK 12: Confidence-based sizing
+    confidence: ConfidenceScore = None
+    base_position_size: float = 0.0    # Before multiplier
+    size_adjustment_reason: str = ""   # Why size was adjusted
 
 
 class RiskController:
@@ -112,7 +150,23 @@ class RiskController:
         self.trading_enabled: bool = True
         self.manual_pause: bool = False
 
+        # TASK 12: Adaptive sizing configuration
+        self.enable_adaptive_sizing: bool = True
+        self.confidence_thresholds = {
+            "high": 70,    # Score >= 70 = high confidence
+            "medium": 40,  # Score >= 40 = medium confidence
+            "low": 20,     # Score >= 20 = low confidence
+            # Score < 20 = skip
+        }
+        self.size_multipliers = {
+            ConfidenceTier.HIGH: 1.5,    # 50% more
+            ConfidenceTier.MEDIUM: 1.0,  # Base size
+            ConfidenceTier.LOW: 0.5,     # Half size
+            ConfidenceTier.SKIP: 0.0,    # Don't trade
+        }
+
         logger.info(f"RiskController initialized with ${self.initial_capital:.2f} capital")
+        logger.info(f"  Adaptive sizing: {'ENABLED' if self.enable_adaptive_sizing else 'DISABLED'}")
 
     def reset_daily_stats(self):
         """Reset daily stats at start of new day."""
@@ -170,6 +224,154 @@ class RiskController:
             quantity = 0
 
         return quantity, position_value
+
+    def calculate_confidence_score(
+        self,
+        orderbook_data: dict = None,
+        regime_data: dict = None,
+        causality_data: dict = None,
+        edge_data: dict = None
+    ) -> ConfidenceScore:
+        """
+        TASK 12: Calculate confidence score for adaptive position sizing.
+
+        Combines multiple signals to determine trade confidence:
+        - Orderbook: Imbalance strength (0-1)
+        - Regime: Market context quality (0-1)
+        - Causality: Clear cause for signal (0-1)
+        - Edge persistence: Expected edge duration (0-1)
+
+        Returns ConfidenceScore with tier and multiplier.
+        """
+        orderbook_data = orderbook_data or {}
+        regime_data = regime_data or {}
+        causality_data = causality_data or {}
+        edge_data = edge_data or {}
+
+        # Calculate component scores (each 0-1)
+
+        # 1. Orderbook Score: Higher imbalance = higher score
+        # Imbalance 0.5 = neutral, 0.6 = threshold, 0.8+ = strong
+        imbalance = orderbook_data.get("imbalance", 0.5)
+        orderbook_score = max(0, min(1, (imbalance - 0.5) / 0.3))  # 0.5->0, 0.8->1
+
+        # Also consider spread stability
+        spread_pct = orderbook_data.get("spread_pct", 0.1)
+        if spread_pct < 0.02:  # Tight spread = good
+            orderbook_score = min(1, orderbook_score + 0.2)
+        elif spread_pct > 0.05:  # Wide spread = reduce
+            orderbook_score = max(0, orderbook_score - 0.3)
+
+        # 2. Regime Score: Trending regimes score higher
+        regime_type = regime_data.get("regime", "unknown")
+        regime_scores = {
+            "high_vol_trend": 1.0,      # Best - clear direction
+            "mean_reversion": 0.8,      # Good - clear patterns
+            "low_vol_consolidation": 0.5,  # Okay - but may not move
+            "choppy": 0.2,              # Poor - noise
+            "liquidity_vacuum": 0.1,    # Bad - unreliable fills
+            "news_spike": 0.0,          # Skip - unpredictable
+            "unknown": 0.4              # Default
+        }
+        regime_score = regime_scores.get(regime_type, 0.4)
+
+        # Regime confidence matters too
+        regime_confidence = regime_data.get("confidence", 0.5)
+        regime_score *= regime_confidence
+
+        # 3. Causality Score: Clear cause = higher score
+        primary_cause = causality_data.get("primary_cause", "unknown")
+        cause_strength = causality_data.get("strength", 0)
+
+        cause_scores = {
+            "orderbook_imbalance": 0.9,  # Primary driver
+            "cvd_divergence": 0.8,       # Strong secondary
+            "price_velocity": 0.6,       # Momentum
+            "btc_correlation": 0.4,      # External factor
+            "unknown": 0.3
+        }
+        base_cause_score = cause_scores.get(primary_cause, 0.3)
+        causality_score = base_cause_score * min(1, cause_strength / 0.02)  # Normalize strength
+
+        # 4. Edge Persistence Score: How long edge is expected to last
+        edge_duration_sec = edge_data.get("expected_duration_sec", 10)
+        # 5s = low, 15s = medium, 30s+ = high
+        edge_persistence_score = min(1, edge_duration_sec / 30)
+
+        # Combine scores with weights
+        weights = {
+            "orderbook": 0.40,    # Primary signal
+            "regime": 0.25,       # Market context
+            "causality": 0.20,    # Why it's happening
+            "edge": 0.15          # How long it'll last
+        }
+
+        total_score = (
+            orderbook_score * weights["orderbook"] +
+            regime_score * weights["regime"] +
+            causality_score * weights["causality"] +
+            edge_persistence_score * weights["edge"]
+        ) * 100  # Convert to 0-100
+
+        # Determine tier
+        if total_score >= self.confidence_thresholds["high"]:
+            tier = ConfidenceTier.HIGH
+        elif total_score >= self.confidence_thresholds["medium"]:
+            tier = ConfidenceTier.MEDIUM
+        elif total_score >= self.confidence_thresholds["low"]:
+            tier = ConfidenceTier.LOW
+        else:
+            tier = ConfidenceTier.SKIP
+
+        size_multiplier = self.size_multipliers[tier]
+
+        # Build reasoning string
+        reasoning = (
+            f"OB:{orderbook_score:.2f} R:{regime_score:.2f} "
+            f"C:{causality_score:.2f} E:{edge_persistence_score:.2f} "
+            f"=> {total_score:.0f}pts ({tier.value})"
+        )
+
+        return ConfidenceScore(
+            total_score=total_score,
+            tier=tier,
+            size_multiplier=size_multiplier,
+            orderbook_score=orderbook_score,
+            regime_score=regime_score,
+            causality_score=causality_score,
+            edge_persistence_score=edge_persistence_score,
+            reasoning=reasoning
+        )
+
+    def calculate_position_size_with_confidence(
+        self,
+        signal: Signal,
+        confidence: ConfidenceScore
+    ) -> tuple:
+        """
+        TASK 12: Calculate position size with confidence-based adjustment.
+
+        Returns (quantity, notional_value, adjustment_reason).
+        """
+        # Get base position size
+        base_quantity, base_value = self.calculate_position_size(signal)
+
+        if not self.enable_adaptive_sizing:
+            return base_quantity, base_value, "Adaptive sizing disabled"
+
+        # Apply confidence multiplier
+        adjusted_value = base_value * confidence.size_multiplier
+        adjusted_quantity = base_quantity * confidence.size_multiplier
+
+        # Build adjustment reason
+        if confidence.size_multiplier > 1.0:
+            adjustment_reason = f"Size +{(confidence.size_multiplier-1)*100:.0f}% (high confidence: {confidence.reasoning})"
+        elif confidence.size_multiplier < 1.0:
+            adjustment_reason = f"Size -{(1-confidence.size_multiplier)*100:.0f}% (low confidence: {confidence.reasoning})"
+        else:
+            adjustment_reason = f"Base size (medium confidence: {confidence.reasoning})"
+
+        return adjusted_quantity, adjusted_value, adjustment_reason
 
     def check_risk(self, signal: Signal) -> RiskDecision:
         """

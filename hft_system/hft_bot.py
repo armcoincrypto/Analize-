@@ -24,7 +24,7 @@ from datetime import datetime
 from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config
 from .websocket_manager import WebSocketManager
 from .signal_engine import SignalEngine
-from .risk_controller import RiskController
+from .risk_controller import RiskController, ConfidenceTier, ConfidenceScore
 from .execution_engine import ExecutionEngine
 from .trade_logger import TradeLogger
 
@@ -85,6 +85,10 @@ class HFTBot:
         self.enable_no_trade_zones = True  # Set False to disable blocking
         self.signals_blocked = 0
 
+        # TASK 12: Adaptive position sizing
+        self.enable_adaptive_sizing = True  # Use confidence-based sizing
+        self.sizing_decisions: dict = {}  # symbol -> last sizing decision
+
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
@@ -140,11 +144,65 @@ class HFTBot:
         # Check risk
         risk_decision = self.risk_controller.check_risk(signal)
 
+        # TASK 12: Calculate confidence score and apply adaptive sizing
+        orderbook = self.ws_manager.get_orderbook(signal.symbol)
+        trade_flow = self.ws_manager.get_trade_flow(signal.symbol)
+
+        orderbook_data = {
+            "imbalance": orderbook.imbalance_ratio if orderbook else 0.5,
+            "spread_pct": orderbook.spread if orderbook else 0.05
+        }
+        regime_data = {
+            "regime": current_regime,
+            "confidence": self.regime_confidence.get(signal.symbol, 0.5)
+        }
+        causality_data = {
+            "primary_cause": "orderbook_imbalance",  # Primary driver for this system
+            "strength": abs(orderbook.imbalance_ratio - 0.5) if orderbook else 0
+        }
+        edge_data = {
+            "expected_duration_sec": 15  # Default expectation
+        }
+
+        confidence = self.risk_controller.calculate_confidence_score(
+            orderbook_data=orderbook_data,
+            regime_data=regime_data,
+            causality_data=causality_data,
+            edge_data=edge_data
+        )
+
+        # Store sizing decision
+        self.sizing_decisions[signal.symbol] = confidence
+
+        # Skip if confidence is too low (SKIP tier)
+        if self.enable_adaptive_sizing and confidence.tier == ConfidenceTier.SKIP:
+            logger.info(f"Signal SKIPPED: {signal.symbol} - confidence={confidence.total_score:.0f} (too low)")
+            self.trade_logger.log_blocked_signal(
+                symbol=signal.symbol,
+                signal_type=signal.signal_type.value,
+                entry_price=signal.entry_price,
+                block_reason="low_confidence",
+                block_details=f"Confidence score {confidence.total_score:.0f} < 20 threshold",
+                market_conditions=orderbook_data,
+                regime=current_regime
+            )
+            self.signals_blocked += 1
+            return
+
+        # Apply confidence-based sizing
+        if self.enable_adaptive_sizing:
+            adjusted_qty, adjusted_value, adjustment_reason = \
+                self.risk_controller.calculate_position_size_with_confidence(signal, confidence)
+            risk_decision.position_size = adjusted_qty
+            risk_decision.position_value = adjusted_value
+            risk_decision.confidence = confidence
+            risk_decision.size_adjustment_reason = adjustment_reason
+
         # Log signal
         self.trade_logger.log_signal(signal, risk_decision)
 
         if risk_decision.approved:
-            # Execute trade
+            # Execute trade with adjusted sizing
             result = await self.execution_engine.execute_entry(signal, risk_decision)
 
             if result.success:
@@ -153,7 +211,6 @@ class HFTBot:
 
                 # Log MICROSTRUCTURE trade flow at entry
                 trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"
-                trade_flow = self.ws_manager.get_trade_flow(signal.symbol)
                 orderbook = self.ws_manager.get_orderbook(signal.symbol)
                 self.trade_logger.log_trade_entry_flow(
                     trade_id=trade_id,
@@ -202,6 +259,38 @@ class HFTBot:
                 entry_regime = self.current_regime.get(signal.symbol, "unknown")
                 self.trade_logger.update_trade_regime(signal.symbol, entry_regime, is_entry=True)
                 logger.info(f"  Market regime: {entry_regime}")
+
+                # TASK 12: Log position sizing decision
+                if self.enable_adaptive_sizing and confidence:
+                    base_qty, base_value = self.risk_controller.calculate_position_size(signal)
+                    confidence_data = {
+                        "total_score": confidence.total_score,
+                        "tier": confidence.tier.value,
+                        "orderbook_score": confidence.orderbook_score,
+                        "regime_score": confidence.regime_score,
+                        "causality_score": confidence.causality_score,
+                        "edge_persistence_score": confidence.edge_persistence_score,
+                        "size_multiplier": confidence.size_multiplier,
+                        "adjustment_reason": risk_decision.size_adjustment_reason,
+                        "reasoning": confidence.reasoning
+                    }
+                    context_data = {
+                        "regime": entry_regime,
+                        "orderbook_imbalance": orderbook.imbalance_ratio if orderbook else 0,
+                        "spread_pct": orderbook.spread if orderbook else 0,
+                        "primary_cause": "orderbook_imbalance"
+                    }
+                    self.trade_logger.log_position_sizing(
+                        trade_id=trade_id,
+                        symbol=signal.symbol,
+                        base_quantity=base_qty,
+                        base_value=base_value,
+                        final_quantity=result.quantity,
+                        final_value=result.quantity * result.entry_price,
+                        confidence_data=confidence_data,
+                        context_data=context_data
+                    )
+                    logger.info(f"  Position sizing: {confidence.tier.value} ({confidence.size_multiplier}x)")
         else:
             logger.info(f"Signal rejected: {signal.symbol} - {risk_decision.message}")
 
@@ -426,6 +515,19 @@ class HFTBot:
             if blocked_stats.get("reason_breakdown"):
                 reasons = [f"{k}: {v['count']}" for k, v in blocked_stats["reason_breakdown"].items()]
                 logger.info(f"    Reasons: {', '.join(reasons)}")
+
+        # TASK 12: Position sizing / confidence stats
+        sizing_stats = self.trade_logger.get_position_sizing_stats()
+        if sizing_stats.get("tier_distribution"):
+            logger.info("  ADAPTIVE SIZING:")
+            for tier, data in sizing_stats["tier_distribution"].items():
+                logger.info(f"    {tier}: {data['count']} trades | "
+                           f"avg score {data['avg_score']:.0f} | "
+                           f"multiplier {data['avg_multiplier']:.2f}x")
+            if sizing_stats.get("tier_performance"):
+                for tier, perf in sizing_stats["tier_performance"].items():
+                    logger.info(f"    {tier} performance: {perf['avg_pnl_pct']:+.4f}% | "
+                               f"win rate {perf['win_rate']:.1f}%")
         logger.info("=" * 60)
 
     async def start(self):
@@ -575,6 +677,43 @@ class HFTBot:
                 logger.info(f"  Bad trades avoided: {blocked_stats['bad_trades_avoided']}")
                 logger.info(f"  Avg loss avoided: {blocked_stats['avg_loss_avoided_pct']:+.4f}%")
                 logger.info(f"  Estimated total savings: {blocked_stats['estimated_savings_pct']:+.4f}%")
+
+        # TASK 12: Adaptive position sizing analysis - HOW MUCH to trade
+        sizing_stats = self.trade_logger.get_position_sizing_stats()
+        if sizing_stats.get("tier_distribution"):
+            logger.info("-" * 60)
+            logger.info("ADAPTIVE SIZING ANALYSIS (confidence-based position sizing)")
+
+            # Show tier distribution
+            if sizing_stats["tier_distribution"]:
+                logger.info("  Tier distribution:")
+                for tier, data in sizing_stats["tier_distribution"].items():
+                    logger.info(f"    {tier}: {data['count']} trades | "
+                               f"avg score {data['avg_score']:.0f} | "
+                               f"multiplier {data['avg_multiplier']:.2f}x")
+
+            # Show performance by tier
+            if sizing_stats.get("tier_performance"):
+                logger.info("  Performance by confidence tier:")
+                for tier, perf in sizing_stats["tier_performance"].items():
+                    logger.info(f"    {tier}: {perf['trades']} trades @ "
+                               f"avg {perf['avg_pnl_pct']:+.4f}% | "
+                               f"win rate {perf['win_rate']:.1f}%")
+
+            # Show component averages
+            if sizing_stats.get("component_averages"):
+                comp = sizing_stats["component_averages"]
+                logger.info(f"  Component avg scores: OB={comp['orderbook_score']:.2f} "
+                           f"Regime={comp['regime_score']:.2f} "
+                           f"Cause={comp['causality_score']:.2f} "
+                           f"Edge={comp['edge_persistence_score']:.2f}")
+
+            # Show sizing summary
+            if sizing_stats.get("sizing_summary"):
+                summary = sizing_stats["sizing_summary"]
+                logger.info(f"  Sizing impact: base ${summary['avg_base_value']:.0f} -> "
+                           f"final ${summary['avg_final_value']:.0f} "
+                           f"({summary['avg_adjustment_pct']:+.1f}% avg adjustment)")
 
         logger.info("=" * 60)
 
