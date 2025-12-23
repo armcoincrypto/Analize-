@@ -94,12 +94,12 @@ class RiskConfig:
     max_total_positions: int = 2
     position_size_pct: float = 1.0  # 1% of capital per trade
 
-    # Daily limits
-    max_daily_losses: int = 3
-    max_daily_drawdown_pct: float = 3.0
+    # Daily limits (set high for dry run data collection)
+    max_daily_losses: int = 100  # No limit in dry run - collect data fast!
+    max_daily_drawdown_pct: float = 50.0  # No limit in dry run
 
     # Trade limits - microstructure = fast
-    min_time_between_trades_sec: int = 5
+    min_time_between_trades_sec: int = 2  # Faster for dry run data collection
 
     # Market filters
     btc_max_volatility_5m: float = 4.0  # Disable if BTC moves >4% in 5min
