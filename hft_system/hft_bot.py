@@ -76,10 +76,17 @@ class HFTBot:
         # TASK 10: Market regime tracking
         self.current_regime: dict = {}  # symbol -> regime type
         self.regime_confidence: dict = {}  # symbol -> confidence
-        # Preferred regimes for trading (can be configured)
-        self.preferred_regimes = ["high_vol_trend", "mean_reversion"]
-        self.avoid_regimes = ["liquidity_vacuum", "news_spike"]
-        self.filter_by_regime = False  # Set True to skip signals in bad regimes
+        # Data-backed regime configuration (from 86 trade analysis)
+        # liquidity_vacuum: 13 trades, 0 wins, -0.04% avg = DISABLE
+        # news_spike: 4 trades, 0 wins, -0.038% avg = DISABLE
+        # unknown: 7 trades, 0 wins, -0.034% avg = DISABLE
+        self.preferred_regimes = ["low_vol_chop", "high_vol_trend"]  # Only profitable regimes
+        self.avoid_regimes = ["liquidity_vacuum", "news_spike", "unknown"]  # HARD BLOCK
+        self.filter_by_regime = True  # ENABLED - skip signals in bad regimes
+
+        # Regime cooldown: pause regime after 2 consecutive losses
+        self.regime_loss_count: dict = {}  # regime -> consecutive loss count
+        self.regime_paused: dict = {}  # regime -> True if paused
 
         # TASK 11: No-trade zone tracking
         self.enable_no_trade_zones = True  # Set False to disable blocking
@@ -105,6 +112,24 @@ class HFTBot:
 
         # TASK 10: Check market regime filter
         current_regime = self.current_regime.get(signal.symbol, "unknown")
+
+        # Check if regime is paused due to consecutive losses
+        if current_regime in self.regime_paused:
+            logger.info(f"Signal SKIPPED: {signal.symbol} - regime={current_regime} (COOLED DOWN)")
+            market_conditions = {"spread_pct": 0, "spread_change_1s": 0,
+                                "delta_variance": 0, "ob_volume_instability": 0, "liquidity_depth": 0}
+            self.trade_logger.log_blocked_signal(
+                symbol=signal.symbol,
+                signal_type=signal.signal_type.value,
+                entry_price=signal.entry_price,
+                block_reason="regime_cooldown",
+                block_details=f"Regime {current_regime} paused after losses",
+                market_conditions=market_conditions,
+                regime=current_regime
+            )
+            self.signals_blocked += 1
+            return
+
         if self.filter_by_regime and current_regime in self.avoid_regimes:
             logger.info(f"Signal SKIPPED: {signal.symbol} - regime={current_regime} (avoided)")
             # Log as blocked signal with regime reason
@@ -307,6 +332,22 @@ class HFTBot:
         # TASK 10: Log regime at exit (before status changes to closed)
         exit_regime = self.current_regime.get(result.symbol, "unknown")
         self.trade_logger.update_trade_regime(result.symbol, exit_regime, is_entry=False)
+
+        # REGIME COOLDOWN: Track losses per regime, pause after 2 consecutive
+        if result.pnl_pct < 0:  # Loss
+            current_count = self.regime_loss_count.get(exit_regime, 0) + 1
+            self.regime_loss_count[exit_regime] = current_count
+
+            if current_count >= 2 and exit_regime not in self.avoid_regimes:
+                self.regime_paused[exit_regime] = True
+                logger.warning(
+                    f"REGIME COOLDOWN: {exit_regime} paused after {current_count} consecutive losses"
+                )
+        else:  # Win - reset loss count
+            self.regime_loss_count[exit_regime] = 0
+            if exit_regime in self.regime_paused:
+                del self.regime_paused[exit_regime]
+                logger.info(f"REGIME COOLDOWN RESET: {exit_regime} back to active")
 
         # Log MICROSTRUCTURE trade flow at exit
         trade_id = f"{result.symbol}_{result.entry_time}"

@@ -117,6 +117,12 @@ class ExecutionEngine:
         self.entry_time: Dict[str, float] = {}        # Entry time for edge duration calc
         self.exit_edge_data: Dict[str, Dict] = {}     # Captured edge data at exit for callback
 
+        # 2-PHASE ENTRY: Probe then Confirm
+        self.is_probe_position: Dict[str, bool] = {}  # symbol -> True if in probe phase
+        self.probe_confirmed: Dict[str, bool] = {}    # symbol -> True if probe confirmed
+        self.probe_start_time: Dict[str, float] = {}  # When probe started
+        self.probe_check_interval: float = 10.0       # Seconds to wait before confirming
+
         logger.info(f"ExecutionEngine initialized in {self.mode.value} mode")
 
     async def execute_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
@@ -154,7 +160,7 @@ class ExecutionEngine:
             )
 
     async def _paper_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
-        """Execute paper trade entry."""
+        """Execute paper trade entry with 2-phase probe logic."""
         # Simulate small slippage (0.01-0.03%)
         slippage = signal.entry_price * 0.0002  # 0.02% average
         if signal.signal_type == SignalType.LONG:
@@ -162,9 +168,19 @@ class ExecutionEngine:
         else:
             fill_price = signal.entry_price - slippage
 
-        # Create position in risk controller
+        # 2-PHASE ENTRY: Start with 0.25x probe size
+        # Will scale up to full size if confirmed after 10s
+        probe_multiplier = 0.25
+        probe_size = risk_decision.position_size * probe_multiplier
+
+        # Create position in risk controller with probe size
         signal.entry_price = fill_price
-        position = self.risk.open_position(signal, risk_decision.position_size)
+        position = self.risk.open_position(signal, probe_size)
+
+        # Track probe state
+        self.is_probe_position[signal.symbol] = True
+        self.probe_confirmed[signal.symbol] = False
+        self.probe_start_time[signal.symbol] = time.time()
 
         # Initialize MFE/MAE tracking
         self.position_mfe[signal.symbol] = 0
@@ -191,15 +207,16 @@ class ExecutionEngine:
             symbol=signal.symbol,
             side=signal.signal_type.value,
             entry_price=fill_price,
-            quantity=risk_decision.position_size,
+            quantity=probe_size,  # Use probe size initially
             timestamp=int(time.time() * 1000),
             order_id=position.position_id
         )
 
+        probe_value = probe_size * fill_price
         logger.info(
-            f"PAPER ENTRY: {signal.symbol} {signal.signal_type.value} | "
-            f"Price: ${fill_price:.4f} | Qty: {risk_decision.position_size:.4f} | "
-            f"Value: ${risk_decision.position_value:.2f}"
+            f"PAPER ENTRY [PROBE 0.25x]: {signal.symbol} {signal.signal_type.value} | "
+            f"Price: ${fill_price:.4f} | Qty: {probe_size:.4f} | "
+            f"Value: ${probe_value:.2f} (full: ${risk_decision.position_value:.2f})"
         )
 
         if self.on_trade:
@@ -234,17 +251,71 @@ class ExecutionEngine:
         MICROSTRUCTURE EXITS (priority order):
         1. Take Profit: +0.15%
         2. Stop Loss: -0.1%
-        3. OB Flip: Orderbook imbalance flipped against position
-        4. Delta Negative: Trade flow turned against position
-        5. Spread Widen: Spread widened 2x+ from entry
-        6. No Movement: No favorable movement after 3s
-        7. Time Stop (fallback): 30s max hold
+        3. Probe Abort: Probe fails confirmation after 10s
+        4. OB Flip: Orderbook imbalance flipped against position
+        5. Delta Negative: Trade flow turned against position
+        6. Spread Widen: Spread widened 2x+ from entry
+        7. Confirmation Timeout: 15s+ with multiple structure failures
+        8. Time Stop (fallback): 30s max hold
         """
         config = get_asset_config(position.symbol)
         current_price = self.ws.get_current_price(position.symbol)
 
         if current_price is None:
             return None
+
+        # 2-PHASE ENTRY: Check probe confirmation at 10s
+        if self.is_probe_position.get(position.symbol, False):
+            probe_start = self.probe_start_time.get(position.symbol, time.time())
+            probe_age = time.time() - probe_start
+
+            if probe_age >= self.probe_check_interval and not self.probe_confirmed.get(position.symbol, False):
+                # Time to confirm or abort the probe
+                orderbook = self.ws.get_orderbook(position.symbol)
+                trade_flow = self.ws.get_trade_flow(position.symbol)
+
+                confirmations = 0
+
+                # Check 1: CVD continues in entry direction
+                if trade_flow:
+                    current_delta = trade_flow.get("delta_1s", 0)
+                    if position.side == SignalType.LONG and current_delta > 0:
+                        confirmations += 1
+                    elif position.side == SignalType.SHORT and current_delta < 0:
+                        confirmations += 1
+
+                # Check 2: OB imbalance holds or strengthens
+                if orderbook:
+                    current_imbalance = orderbook.imbalance_ratio
+                    entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)
+                    if position.side == SignalType.LONG:
+                        if current_imbalance >= entry_imbalance - 0.1:  # Within 10%
+                            confirmations += 1
+                    else:
+                        if current_imbalance <= entry_imbalance + 0.1:
+                            confirmations += 1
+
+                # Check 3: Spread hasn't widened significantly
+                if orderbook:
+                    current_spread = orderbook.spread
+                    entry_spread = self.entry_spread.get(position.symbol, 0)
+                    if entry_spread > 0 and current_spread < entry_spread * 1.5:
+                        confirmations += 1
+
+                # Need 2/3 confirmations to continue
+                if confirmations >= 2:
+                    self.probe_confirmed[position.symbol] = True
+                    logger.info(
+                        f"{position.symbol} PROBE CONFIRMED: {confirmations}/3 checks passed | "
+                        f"Continuing position"
+                    )
+                else:
+                    # Abort probe - exit with tiny loss
+                    logger.info(
+                        f"{position.symbol} PROBE ABORTED: Only {confirmations}/3 checks | "
+                        f"Exiting to limit loss"
+                    )
+                    return ExitReason.NO_MOVEMENT  # Use this for tiny loss exit
 
         # Calculate current P&L
         if position.side == SignalType.LONG:
@@ -391,31 +462,53 @@ class ExecutionEngine:
                 )
                 return ExitReason.SPREAD_WIDEN
 
-        # 6. No Movement: Check after 3 seconds
-        if hold_time >= 3:
-            check_time = self.entry_check_time.get(position.symbol, 0)
-            if check_time == 0:
-                # First check at 3s - record price
-                self.entry_check_time[position.symbol] = time.time()
-                self.entry_price_check[position.symbol] = current_price
-            elif time.time() - check_time >= 1:  # Check again after 1s
-                entry_check_price = self.entry_price_check.get(position.symbol, position.entry_price)
-                price_movement = (current_price - entry_check_price) / entry_check_price * 100
+        # 6. CONFIRMATION TIMEOUT: Only exit after 15s if MULTIPLE structure failures
+        # Time alone should NEVER trigger a loss - require confirmation
+        if hold_time >= 15:
+            failures = 0
+            failure_reasons = []
 
+            # Check if delta weakened
+            if trade_flow:
+                current_delta = trade_flow.get("delta_1s", 0)
+                entry_delta = self.entry_delta.get(position.symbol, 0)
                 if position.side == SignalType.LONG:
-                    # For LONG: No positive movement or slightly negative
-                    if price_movement <= 0.02:  # Less than 0.02% improvement
-                        logger.info(
-                            f"{position.symbol} NO MOVEMENT: {price_movement:.3f}% in {hold_time:.1f}s"
-                        )
-                        return ExitReason.NO_MOVEMENT
+                    if current_delta < 0:  # Delta turned negative
+                        failures += 1
+                        failure_reasons.append("delta_weak")
                 else:
-                    # For SHORT: No negative movement (price should go down)
-                    if price_movement >= -0.02:
-                        logger.info(
-                            f"{position.symbol} NO MOVEMENT: {price_movement:.3f}% in {hold_time:.1f}s"
-                        )
-                        return ExitReason.NO_MOVEMENT
+                    if current_delta > 0:  # Delta turned positive
+                        failures += 1
+                        failure_reasons.append("delta_weak")
+
+            # Check if OB imbalance flipped/weakened
+            if orderbook:
+                current_imbalance = orderbook.imbalance_ratio
+                entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)
+                if position.side == SignalType.LONG:
+                    if current_imbalance < 0.45:  # OB turned bearish
+                        failures += 1
+                        failure_reasons.append("ob_weak")
+                else:
+                    if current_imbalance > 0.55:  # OB turned bullish
+                        failures += 1
+                        failure_reasons.append("ob_weak")
+
+            # Check if spread widened
+            if orderbook:
+                current_spread = orderbook.spread
+                entry_spread = self.entry_spread.get(position.symbol, 0)
+                if entry_spread > 0 and current_spread > entry_spread * 1.5:
+                    failures += 1
+                    failure_reasons.append("spread_wide")
+
+            # Only exit if 2+ structure failures AND not in profit
+            if failures >= 2 and pnl_pct < 0.03:
+                logger.info(
+                    f"{position.symbol} CONFIRMATION TIMEOUT: {hold_time:.1f}s | "
+                    f"Failures: {', '.join(failure_reasons)} | PnL: {pnl_pct:.3f}%"
+                )
+                return ExitReason.NO_MOVEMENT  # Reuse exit reason for DB compatibility
 
         # 7. Flow Neutral: Trade flow went neutral after 3s (no edge left)
         if hold_time >= 3 and trade_flow:
@@ -542,6 +635,11 @@ class ExecutionEngine:
         self.time_of_delta_flip.pop(position.symbol, None)
         self.ob_decay_amount.pop(position.symbol, None)
         self.entry_time.pop(position.symbol, None)
+
+        # Clean up probe tracking data
+        self.is_probe_position.pop(position.symbol, None)
+        self.probe_confirmed.pop(position.symbol, None)
+        self.probe_start_time.pop(position.symbol, None)
 
         # Close in risk controller
         self.risk.close_position(position.symbol, fill_price, reason.value)

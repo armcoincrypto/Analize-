@@ -48,11 +48,11 @@ class AssetConfig:
     rsi_oversold: float = 25.0
     rsi_overbought: float = 75.0
 
-    # Exit settings (MICROSTRUCTURE - based on 141K signal analysis)
-    # Edge is 0.008-0.014% - targets must match!
-    take_profit_pct: float = 0.15         # Realistic for microstructure
-    stop_loss_pct: float = 0.10           # Tight risk - 1.5:1 reward/risk
-    time_stop_seconds: int = 30           # Micro trades = 10-30 seconds
+    # Exit settings (STRUCTURE-BASED - let structure decide, not timers)
+    # Increased limits to give structure-based exits time to work
+    take_profit_pct: float = 0.20         # Slightly higher TP for bigger moves
+    stop_loss_pct: float = 0.12           # Slightly wider SL
+    time_stop_seconds: int = 60           # Increased to 60s - structure exits first
     min_profit_for_time_check: float = 0.05  # Any profit = exit at time
     use_trailing_stop: bool = False       # Not useful for micro trades
     trailing_stop_activation: float = 0.08  # Lower activation
@@ -137,8 +137,8 @@ class SystemConfig:
     # Database
     db_path: str = "hft_trades.db"
 
-    # Assets to trade
-    enabled_assets: List[str] = field(default_factory=lambda: ["ATOM", "SUI", "XRP"])
+    # Assets to trade (data-backed: ATOM had 0% win rate in 19 trades - DISABLED)
+    enabled_assets: List[str] = field(default_factory=lambda: ["SUI", "XRP"])
 
     # Entry conditions - data shows 1/5 is OPTIMAL (more = worse)
     # Orderbook alone: +0.012% at 5m with 55,781 signals
