@@ -317,7 +317,10 @@ class ExecutionEngine:
                     )
                     return ExitReason.NO_MOVEMENT  # Use this for tiny loss exit
 
-        # Calculate current P&L
+        # Calculate current P&L (guard against division by zero)
+        if not position.entry_price or position.entry_price <= 0:
+            return None  # Can't calculate P&L without valid entry price
+
         if position.side == SignalType.LONG:
             pnl_pct = (current_price - position.entry_price) / position.entry_price * 100
         else:
@@ -583,13 +586,17 @@ class ExecutionEngine:
         else:
             fill_price = exit_price + slippage
 
-        # Calculate final P&L
-        if position.side == SignalType.LONG:
-            pnl = (fill_price - position.entry_price) * position.quantity
-            pnl_pct = (fill_price - position.entry_price) / position.entry_price * 100
+        # Calculate final P&L (guard against division by zero)
+        if position.entry_price and position.entry_price > 0:
+            if position.side == SignalType.LONG:
+                pnl = (fill_price - position.entry_price) * position.quantity
+                pnl_pct = (fill_price - position.entry_price) / position.entry_price * 100
+            else:
+                pnl = (position.entry_price - fill_price) * position.quantity
+                pnl_pct = (position.entry_price - fill_price) / position.entry_price * 100
         else:
-            pnl = (position.entry_price - fill_price) * position.quantity
-            pnl_pct = (position.entry_price - fill_price) / position.entry_price * 100
+            pnl = 0
+            pnl_pct = 0
 
         hold_time = (time.time() * 1000 - position.entry_time) / 1000
 
@@ -711,7 +718,7 @@ class ExecutionEngine:
 
         for position in positions:
             current_price = self.ws.get_current_price(position.symbol)
-            if current_price:
+            if current_price and position.entry_price and position.entry_price > 0:
                 if position.side == SignalType.LONG:
                     pnl_pct = (current_price - position.entry_price) / position.entry_price * 100
                 else:
