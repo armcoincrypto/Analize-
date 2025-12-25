@@ -84,9 +84,11 @@ class HFTBot:
         self.avoid_regimes = ["liquidity_vacuum", "news_spike", "unknown"]  # HARD BLOCK
         self.filter_by_regime = True  # ENABLED - skip signals in bad regimes
 
-        # Regime cooldown: pause regime after 2 consecutive losses
+        # Regime cooldown: DISABLED for now - need more data collection
+        # Will re-enable once we have 200+ trades with positive expectancy
         self.regime_loss_count: dict = {}  # regime -> consecutive loss count
         self.regime_paused: dict = {}  # regime -> True if paused
+        self.enable_regime_cooldown = False  # DISABLED - collect more data first
 
         # TASK 11: No-trade zone tracking
         self.enable_no_trade_zones = True  # Set False to disable blocking
@@ -113,8 +115,8 @@ class HFTBot:
         # TASK 10: Check market regime filter
         current_regime = self.current_regime.get(signal.symbol, "unknown")
 
-        # Check if regime is paused due to consecutive losses
-        if current_regime in self.regime_paused:
+        # Check if regime is paused due to consecutive losses (if cooldown enabled)
+        if self.enable_regime_cooldown and current_regime in self.regime_paused:
             logger.info(f"Signal SKIPPED: {signal.symbol} - regime={current_regime} (COOLED DOWN)")
             market_conditions = {"spread_pct": 0, "spread_change_1s": 0,
                                 "delta_variance": 0, "ob_volume_instability": 0, "liquidity_depth": 0}
@@ -333,21 +335,22 @@ class HFTBot:
         exit_regime = self.current_regime.get(result.symbol, "unknown")
         self.trade_logger.update_trade_regime(result.symbol, exit_regime, is_entry=False)
 
-        # REGIME COOLDOWN: Track losses per regime, pause after 2 consecutive
-        if result.pnl_pct < 0:  # Loss
-            current_count = self.regime_loss_count.get(exit_regime, 0) + 1
-            self.regime_loss_count[exit_regime] = current_count
+        # REGIME COOLDOWN: Track losses per regime, pause after 2 consecutive (if enabled)
+        if self.enable_regime_cooldown:
+            if result.pnl_pct < 0:  # Loss
+                current_count = self.regime_loss_count.get(exit_regime, 0) + 1
+                self.regime_loss_count[exit_regime] = current_count
 
-            if current_count >= 2 and exit_regime not in self.avoid_regimes:
-                self.regime_paused[exit_regime] = True
-                logger.warning(
-                    f"REGIME COOLDOWN: {exit_regime} paused after {current_count} consecutive losses"
-                )
-        else:  # Win - reset loss count
-            self.regime_loss_count[exit_regime] = 0
-            if exit_regime in self.regime_paused:
-                del self.regime_paused[exit_regime]
-                logger.info(f"REGIME COOLDOWN RESET: {exit_regime} back to active")
+                if current_count >= 2 and exit_regime not in self.avoid_regimes:
+                    self.regime_paused[exit_regime] = True
+                    logger.warning(
+                        f"REGIME COOLDOWN: {exit_regime} paused after {current_count} consecutive losses"
+                    )
+            else:  # Win - reset loss count
+                self.regime_loss_count[exit_regime] = 0
+                if exit_regime in self.regime_paused:
+                    del self.regime_paused[exit_regime]
+                    logger.info(f"REGIME COOLDOWN RESET: {exit_regime} back to active")
 
         # Log MICROSTRUCTURE trade flow at exit
         trade_id = f"{result.symbol}_{result.entry_time}"
