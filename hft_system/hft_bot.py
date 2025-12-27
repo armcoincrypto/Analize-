@@ -3,12 +3,26 @@ HFT Trading Bot
 ===============
 Main entry point for the HFT trading system.
 
+# ============================================================
+# STRATEGY LOCKED — DO NOT MODIFY
+# Validation phase: stability testing
+# Last update: 2025-12-26
+# ============================================================
+
 Combines all components:
 - WebSocket Manager: Real-time data feeds
 - Signal Engine: Multi-condition signal detection
 - Risk Controller: Position and risk management
 - Execution Engine: Trade execution with TP/SL/Time stops
 - Trade Logger: Persistent logging for analysis
+
+LOCKED CONFIGURATION (data-validated from 332 trades):
+- Enabled exits: TP, SL, MICRO_PROFIT, OB_FLIP, DELTA_NEGATIVE (softened), TIME_STOP
+- Disabled exits: NO_MOVEMENT (0% win), FLOW_NEUTRAL, CONFIRMATION_TIMEOUT
+- Allowed regimes: low_vol_chop, high_vol_trend, mean_reversion
+- Blocked regimes: liquidity_vacuum, news_spike, unknown
+- Allowed symbols: SUI, XRP (ATOM disabled - 0% win rate)
+- Confidence: HIGH always, MEDIUM if daily_pnl > 0, LOW disabled
 
 Usage:
     python -m hft_system.hft_bot [--live] [--capital 10000]
@@ -98,15 +112,43 @@ class HFTBot:
         self.enable_adaptive_sizing = True  # Use confidence-based sizing
         self.sizing_decisions: dict = {}  # symbol -> last sizing decision
 
+        logger.info("=" * 60)
+        logger.info("STRATEGY LOCKED - STABILITY TESTING PHASE")
+        logger.info("=" * 60)
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
-        logger.info(f"  Assets: {', '.join(SYSTEM_CONFIG.enabled_assets)}")
-        logger.info(f"  Entry: {SYSTEM_CONFIG.min_entry_conditions}/5 conditions required")
-        # Get exit settings from first asset config
+
+        # Asset configuration
+        logger.info(f"SYMBOLS:")
+        logger.info(f"  Enabled: {', '.join(SYSTEM_CONFIG.enabled_assets)}")
+        logger.info(f"  Disabled: ATOM (0% win rate in 19 trades)")
+
+        # Exit configuration
         asset_config = get_asset_config(SYSTEM_CONFIG.enabled_assets[0])
-        logger.info(f"  Exit: +{asset_config.take_profit_pct}% TP, -{asset_config.stop_loss_pct}% SL, {asset_config.time_stop_seconds}s time stop")
-        logger.info(f"  Optimized: Orderbook + RSI combo priority (best performer)")
+        logger.info(f"EXITS (enabled):")
+        logger.info(f"  Take Profit: +{asset_config.take_profit_pct}%")
+        logger.info(f"  Stop Loss: -{asset_config.stop_loss_pct}%")
+        logger.info(f"  Micro Profit: +0.05% with OB weakening (100% win rate)")
+        logger.info(f"  OB Flip: Orderbook flipped against position")
+        logger.info(f"  Delta Negative: SOFTENED (3s sustained OR OB combo)")
+        logger.info(f"  Time Stop: {asset_config.time_stop_seconds}s fallback")
+        logger.info(f"EXITS (disabled - 0% or low win rate):")
+        logger.info(f"  NO_MOVEMENT: DISABLED (0% win in 54 trades)")
+        logger.info(f"  FLOW_NEUTRAL: DISABLED")
+        logger.info(f"  CONFIRMATION_TIMEOUT: DISABLED")
+
+        # Regime configuration
+        logger.info(f"REGIMES:")
+        logger.info(f"  Allowed: {', '.join(self.preferred_regimes)}")
+        logger.info(f"  Blocked: {', '.join(self.avoid_regimes)}")
+
+        # Confidence configuration
+        logger.info(f"CONFIDENCE FILTERING:")
+        logger.info(f"  HIGH (27.3% win): ALWAYS ALLOWED")
+        logger.info(f"  MEDIUM (15.9% win): Only if daily PnL > 0")
+        logger.info(f"  LOW (14.0% win): FULLY DISABLED")
+        logger.info("=" * 60)
 
     async def _on_signal(self, signal):
         """Handle new signal from signal engine."""
@@ -201,14 +243,55 @@ class HFTBot:
         # Store sizing decision
         self.sizing_decisions[signal.symbol] = confidence
 
-        # Skip if confidence is too low (SKIP tier)
-        if self.enable_adaptive_sizing and confidence.tier == ConfidenceTier.SKIP:
+        # ============================================================
+        # STRICT CONFIDENCE FILTERING (data-validated)
+        # HIGH confidence: 27.3% win rate - ALWAYS ALLOWED
+        # MEDIUM confidence: 15.9% win rate - ONLY if daily PnL > 0
+        # LOW confidence: 14.0% win rate - FULLY DISABLED
+        # SKIP tier: Already blocked
+        # ============================================================
+
+        # Get daily PnL for MEDIUM tier decision
+        daily_pnl = self.risk_controller.get_status()['capital']['daily_pnl']
+
+        # Block LOW confidence trades entirely (data shows 14% win rate)
+        if confidence.tier == ConfidenceTier.LOW:
+            logger.info(f"Signal SKIPPED: {signal.symbol} - LOW confidence={confidence.total_score:.0f} (disabled)")
+            self.trade_logger.log_blocked_signal(
+                symbol=signal.symbol,
+                signal_type=signal.signal_type.value,
+                entry_price=signal.entry_price,
+                block_reason="low_confidence_disabled",
+                block_details=f"LOW confidence tier disabled (14% win rate)",
+                market_conditions=orderbook_data,
+                regime=current_regime
+            )
+            self.signals_blocked += 1
+            return
+
+        # Block MEDIUM confidence if daily PnL is negative
+        if confidence.tier == ConfidenceTier.MEDIUM and daily_pnl < 0:
+            logger.info(f"Signal SKIPPED: {signal.symbol} - MEDIUM confidence blocked (daily PnL=${daily_pnl:.2f})")
+            self.trade_logger.log_blocked_signal(
+                symbol=signal.symbol,
+                signal_type=signal.signal_type.value,
+                entry_price=signal.entry_price,
+                block_reason="medium_confidence_pnl_negative",
+                block_details=f"MEDIUM tier blocked when daily PnL < 0 (${daily_pnl:.2f})",
+                market_conditions=orderbook_data,
+                regime=current_regime
+            )
+            self.signals_blocked += 1
+            return
+
+        # Skip if confidence is SKIP tier
+        if confidence.tier == ConfidenceTier.SKIP:
             logger.info(f"Signal SKIPPED: {signal.symbol} - confidence={confidence.total_score:.0f} (too low)")
             self.trade_logger.log_blocked_signal(
                 symbol=signal.symbol,
                 signal_type=signal.signal_type.value,
                 entry_price=signal.entry_price,
-                block_reason="low_confidence",
+                block_reason="skip_confidence",
                 block_details=f"Confidence score {confidence.total_score:.0f} < 20 threshold",
                 market_conditions=orderbook_data,
                 regime=current_regime

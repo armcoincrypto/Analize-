@@ -3,10 +3,24 @@ Execution Engine for HFT System
 ===============================
 Handles trade execution and exit management.
 
-EXIT CONDITIONS:
-- Take Profit: +2% from entry
-- Stop Loss: -1% from entry
-- Time Stop: 90 seconds with <0.5% profit
+# ============================================================
+# STRATEGY LOCKED — DO NOT MODIFY
+# Validation phase: stability testing
+# Last update: 2025-12-26
+# ============================================================
+
+EXIT PRIORITY (data-validated):
+1. Take Profit: +0.20% (KEEP)
+2. Stop Loss: -0.12% (KEEP)
+3. MICRO PROFIT: +0.05% with OB weakening (PROMOTED - 100% win rate)
+4. OB Flip: Orderbook flipped against position (KEEP)
+5. Delta Negative: SOFTENED - requires sustained delta OR OB flip
+6. Time Stop: 60s fallback (KEEP)
+
+DISABLED EXITS (data-proven losers):
+- NO_MOVEMENT: 0% win rate in 54 trades - COMPLETELY DISABLED
+- FLOW_NEUTRAL: Low win rate - DISABLED
+- CONFIRMATION_TIMEOUT: Covered by time_stop - DISABLED
 
 Also monitors open positions every tick for exit opportunities.
 """
@@ -122,6 +136,10 @@ class ExecutionEngine:
         self.probe_confirmed: Dict[str, bool] = {}    # symbol -> True if probe confirmed
         self.probe_start_time: Dict[str, float] = {}  # When probe started
         self.probe_check_interval: float = 10.0       # Seconds to wait before confirming
+
+        # SOFTENED DELTA EXIT: Track sustained negative delta
+        self.delta_negative_start: Dict[str, float] = {}  # When delta first turned negative
+        self.delta_negative_duration: float = 3.0  # Require 3 seconds of negative delta
 
         logger.info(f"ExecutionEngine initialized in {self.mode.value} mode")
 
@@ -248,15 +266,21 @@ class ExecutionEngine:
         """
         Check if position should be exited.
 
-        MICROSTRUCTURE EXITS (priority order):
-        1. Take Profit: +0.15%
-        2. Stop Loss: -0.1%
-        3. Probe Abort: Probe fails confirmation after 10s
-        4. OB Flip: Orderbook imbalance flipped against position
-        5. Delta Negative: Trade flow turned against position
-        6. Spread Widen: Spread widened 2x+ from entry
-        7. Confirmation Timeout: 15s+ with multiple structure failures
-        8. Time Stop (fallback): 30s max hold
+        # ============================================================
+        # STRATEGY LOCKED - EXIT PRIORITY (data-validated)
+        # ============================================================
+        1. Take Profit: +0.20%
+        2. Stop Loss: -0.12%
+        3. MICRO PROFIT: +0.05% with OB weakening (100% win rate - PROMOTED)
+        4. OB Flip: Orderbook flipped against position
+        5. Delta Negative: SOFTENED - requires 3s sustained OR OB flip combo
+        6. Spread Widen: 2x entry spread
+        7. Time Stop: 60s fallback
+
+        DISABLED (0% or low win rate):
+        - NO_MOVEMENT: COMPLETELY DISABLED
+        - FLOW_NEUTRAL: DISABLED
+        - CONFIRMATION_TIMEOUT: DISABLED
         """
         config = get_asset_config(position.symbol)
         current_price = self.ws.get_current_price(position.symbol)
@@ -265,6 +289,7 @@ class ExecutionEngine:
             return None
 
         # 2-PHASE ENTRY: Check probe confirmation at 10s
+        # NOTE: Probe abort now uses TIME_STOP instead of NO_MOVEMENT
         if self.is_probe_position.get(position.symbol, False):
             probe_start = self.probe_start_time.get(position.symbol, time.time())
             probe_age = time.time() - probe_start
@@ -309,13 +334,7 @@ class ExecutionEngine:
                         f"{position.symbol} PROBE CONFIRMED: {confirmations}/3 checks passed | "
                         f"Continuing position"
                     )
-                else:
-                    # Abort probe - exit with tiny loss
-                    logger.info(
-                        f"{position.symbol} PROBE ABORTED: Only {confirmations}/3 checks | "
-                        f"Exiting to limit loss"
-                    )
-                    return ExitReason.NO_MOVEMENT  # Use this for tiny loss exit
+                # If probe fails, let it continue to time_stop (don't force exit here)
 
         # Calculate current P&L (guard against division by zero)
         if not position.entry_price or position.entry_price <= 0:
@@ -434,25 +453,46 @@ class ExecutionEngine:
                     )
                     return ExitReason.OB_FLIP
 
-        # 4. Delta Negative: Trade flow turned against us
+        # 5. Delta Negative: SOFTENED - requires SUSTAINED negative delta (3s) OR OB flip combo
+        # Data showed 6.3% win rate when triggering too early - now require confirmation
         if trade_flow:
             current_delta = trade_flow.get("delta_1s", 0)
             entry_delta = self.entry_delta.get(position.symbol, 0)
+            delta_against = False
 
             if position.side == SignalType.LONG:
-                # For LONG: Exit if delta turned significantly negative (sellers winning)
-                if entry_delta > 0 and current_delta < -abs(entry_delta) * 0.5:
+                delta_against = entry_delta > 0 and current_delta < -abs(entry_delta) * 0.5
+            else:
+                delta_against = entry_delta < 0 and current_delta > abs(entry_delta) * 0.5
+
+            if delta_against:
+                # Track when delta first turned against us
+                if position.symbol not in self.delta_negative_start:
+                    self.delta_negative_start[position.symbol] = time.time()
+
+                # Check if sustained for 3+ seconds
+                delta_negative_time = time.time() - self.delta_negative_start[position.symbol]
+
+                # Also check if OB has flipped (combo confirmation)
+                ob_also_flipped = False
+                if orderbook:
+                    current_imbalance = orderbook.imbalance_ratio
+                    if position.side == SignalType.LONG and current_imbalance < 0.4:
+                        ob_also_flipped = True
+                    elif position.side == SignalType.SHORT and current_imbalance > 0.6:
+                        ob_also_flipped = True
+
+                # Exit only if SUSTAINED (3s+) OR combo with OB flip
+                if delta_negative_time >= self.delta_negative_duration or ob_also_flipped:
                     logger.info(
-                        f"{position.symbol} DELTA NEGATIVE: {entry_delta:.0f} -> {current_delta:.0f}"
+                        f"{position.symbol} DELTA NEGATIVE (sustained {delta_negative_time:.1f}s, ob_flip={ob_also_flipped}): "
+                        f"{entry_delta:.0f} -> {current_delta:.0f}"
                     )
+                    self.delta_negative_start.pop(position.symbol, None)  # Clean up
                     return ExitReason.DELTA_NEGATIVE
             else:
-                # For SHORT: Exit if delta turned significantly positive (buyers winning)
-                if entry_delta < 0 and current_delta > abs(entry_delta) * 0.5:
-                    logger.info(
-                        f"{position.symbol} DELTA NEGATIVE: {entry_delta:.0f} -> {current_delta:.0f}"
-                    )
-                    return ExitReason.DELTA_NEGATIVE
+                # Delta recovered, reset the timer
+                self.delta_negative_start.pop(position.symbol, None)
 
         # 5. Spread Widen: Spread widened >2x from entry
         if orderbook:
@@ -465,84 +505,15 @@ class ExecutionEngine:
                 )
                 return ExitReason.SPREAD_WIDEN
 
-        # 6. CONFIRMATION TIMEOUT: Only exit after 15s if MULTIPLE structure failures
-        # Time alone should NEVER trigger a loss - require confirmation
-        if hold_time >= 15:
-            failures = 0
-            failure_reasons = []
+        # ============================================================
+        # DISABLED EXITS (data-proven losers - DO NOT RE-ENABLE)
+        # ============================================================
+        # CONFIRMATION_TIMEOUT: 0% win rate - DISABLED
+        # FLOW_NEUTRAL: Low win rate - DISABLED
+        # NO_MOVEMENT: 0% win rate in 54 trades - DISABLED
+        # ============================================================
 
-            # Check if delta weakened
-            if trade_flow:
-                current_delta = trade_flow.get("delta_1s", 0)
-                entry_delta = self.entry_delta.get(position.symbol, 0)
-                if position.side == SignalType.LONG:
-                    if current_delta < 0:  # Delta turned negative
-                        failures += 1
-                        failure_reasons.append("delta_weak")
-                else:
-                    if current_delta > 0:  # Delta turned positive
-                        failures += 1
-                        failure_reasons.append("delta_weak")
-
-            # Check if OB imbalance flipped/weakened
-            if orderbook:
-                current_imbalance = orderbook.imbalance_ratio
-                entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)
-                if position.side == SignalType.LONG:
-                    if current_imbalance < 0.45:  # OB turned bearish
-                        failures += 1
-                        failure_reasons.append("ob_weak")
-                else:
-                    if current_imbalance > 0.55:  # OB turned bullish
-                        failures += 1
-                        failure_reasons.append("ob_weak")
-
-            # Check if spread widened
-            if orderbook:
-                current_spread = orderbook.spread
-                entry_spread = self.entry_spread.get(position.symbol, 0)
-                if entry_spread > 0 and current_spread > entry_spread * 1.5:
-                    failures += 1
-                    failure_reasons.append("spread_wide")
-
-            # Only exit if 2+ structure failures AND not in profit
-            if failures >= 2 and pnl_pct < 0.03:
-                logger.info(
-                    f"{position.symbol} CONFIRMATION TIMEOUT: {hold_time:.1f}s | "
-                    f"Failures: {', '.join(failure_reasons)} | PnL: {pnl_pct:.3f}%"
-                )
-                return ExitReason.NO_MOVEMENT  # Reuse exit reason for DB compatibility
-
-        # 7. Flow Neutral: Trade flow went neutral after 3s (no edge left)
-        if hold_time >= 3 and trade_flow:
-            delta_1s = trade_flow.get("delta_1s", 0)
-            delta_pct = trade_flow.get("delta_pct", 0)
-
-            # Check if flow is essentially neutral (within ±10%)
-            if abs(delta_pct) < 10:
-                # Also check OB hasn't improved
-                if orderbook:
-                    current_imbalance = orderbook.imbalance_ratio
-                    entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)
-
-                    if position.side == SignalType.LONG:
-                        # For LONG: OB should be improving (higher imbalance)
-                        if current_imbalance <= entry_imbalance:
-                            logger.info(
-                                f"{position.symbol} FLOW NEUTRAL: delta_pct={delta_pct:.1f}% | "
-                                f"OB not improved {entry_imbalance:.1%} -> {current_imbalance:.1%}"
-                            )
-                            return ExitReason.FLOW_NEUTRAL
-                    else:
-                        # For SHORT: OB should be improving (lower imbalance)
-                        if current_imbalance >= entry_imbalance:
-                            logger.info(
-                                f"{position.symbol} FLOW NEUTRAL: delta_pct={delta_pct:.1f}% | "
-                                f"OB not improved {entry_imbalance:.1%} -> {current_imbalance:.1%}"
-                            )
-                            return ExitReason.FLOW_NEUTRAL
-
-        # 8. Time Stop (fallback): Still keep as ultimate backstop
+        # 7. Time Stop (fallback): Keep as ultimate backstop
         if hold_time >= config.time_stop_seconds:
             if pnl_pct < config.min_profit_for_time_check:
                 logger.info(
@@ -647,6 +618,9 @@ class ExecutionEngine:
         self.is_probe_position.pop(position.symbol, None)
         self.probe_confirmed.pop(position.symbol, None)
         self.probe_start_time.pop(position.symbol, None)
+
+        # Clean up softened delta tracking
+        self.delta_negative_start.pop(position.symbol, None)
 
         # Close in risk controller
         self.risk.close_position(position.symbol, fill_price, reason.value)
