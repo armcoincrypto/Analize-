@@ -143,11 +143,14 @@ class HFTBot:
         logger.info(f"  Allowed: {', '.join(self.preferred_regimes)}")
         logger.info(f"  Blocked: {', '.join(self.avoid_regimes)}")
 
-        # Confidence configuration
-        logger.info(f"CONFIDENCE FILTERING:")
+        # Confidence configuration - PROFESSIONAL OPTION B
+        logger.info(f"CONFIDENCE GATING (Professional Option B):")
         logger.info(f"  HIGH (27.3% win): ALWAYS ALLOWED")
-        logger.info(f"  MEDIUM (15.9% win): Only if daily PnL > 0")
-        logger.info(f"  LOW (14.0% win): FULLY DISABLED")
+        logger.info(f"  MEDIUM (15.9% win):")
+        logger.info(f"    - Day start (PnL=0): ALLOWED (exploration)")
+        logger.info(f"    - After loss (PnL<0): BLOCKED (contraction)")
+        logger.info(f"    - After win (PnL>0): ALLOWED (expansion)")
+        logger.info(f"  LOW (14.0% win): ALWAYS BLOCKED")
         logger.info("=" * 60)
 
     async def _on_signal(self, signal):
@@ -244,17 +247,24 @@ class HFTBot:
         self.sizing_decisions[signal.symbol] = confidence
 
         # ============================================================
-        # STRICT CONFIDENCE FILTERING (data-validated)
-        # HIGH confidence: 27.3% win rate - ALWAYS ALLOWED
-        # MEDIUM confidence: 15.9% win rate - ONLY if daily PnL > 0
-        # LOW confidence: 14.0% win rate - FULLY DISABLED
-        # SKIP tier: Already blocked
+        # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)
+        # ============================================================
+        # This creates: Exploration when safe, Contraction when hurt,
+        #               Expansion when proven
+        #
+        # HIGH confidence (27.3% win): ALWAYS ALLOWED
+        # MEDIUM confidence (15.9% win):
+        #   - PnL == 0 (day start): ALLOWED (exploration)
+        #   - PnL < 0 (after loss): BLOCKED (contraction)
+        #   - PnL > 0 (after win): ALLOWED (expansion)
+        # LOW confidence (14.0% win): ALWAYS BLOCKED
+        # SKIP tier: ALWAYS BLOCKED
         # ============================================================
 
         # Get daily PnL for MEDIUM tier decision
         daily_pnl = self.risk_controller.get_status()['capital']['daily_pnl']
 
-        # Block LOW confidence trades entirely (data shows 14% win rate)
+        # LOW confidence: Always blocked (14% win rate too low)
         if confidence.tier == ConfidenceTier.LOW:
             logger.info(f"Signal SKIPPED: {signal.symbol} - LOW confidence={confidence.total_score:.0f} (disabled)")
             self.trade_logger.log_blocked_signal(
@@ -269,15 +279,16 @@ class HFTBot:
             self.signals_blocked += 1
             return
 
-        # Block MEDIUM confidence if daily PnL is negative
+        # MEDIUM confidence: CONTRACTION mode when PnL < 0
+        # (Allowed at day start PnL=0, blocked after losses, allowed after wins)
         if confidence.tier == ConfidenceTier.MEDIUM and daily_pnl < 0:
-            logger.info(f"Signal SKIPPED: {signal.symbol} - MEDIUM confidence blocked (daily PnL=${daily_pnl:.2f})")
+            logger.info(f"Signal SKIPPED: {signal.symbol} - MEDIUM blocked [CONTRACTION mode] (PnL=${daily_pnl:.2f})")
             self.trade_logger.log_blocked_signal(
                 symbol=signal.symbol,
                 signal_type=signal.signal_type.value,
                 entry_price=signal.entry_price,
-                block_reason="medium_confidence_pnl_negative",
-                block_details=f"MEDIUM tier blocked when daily PnL < 0 (${daily_pnl:.2f})",
+                block_reason="medium_contraction_mode",
+                block_details=f"MEDIUM blocked in contraction mode (PnL=${daily_pnl:.2f} < 0)",
                 market_conditions=orderbook_data,
                 regime=current_regime
             )
