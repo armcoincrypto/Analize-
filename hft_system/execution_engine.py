@@ -5,20 +5,20 @@ Handles trade execution and exit management.
 
 # ============================================================
 # STRATEGY LOCKED — DO NOT MODIFY
-# Validation phase: stability testing
-# Last update: 2025-12-26
+# Validation phase: edge preservation
+# Last update: 2025-12-31
 # ============================================================
 
 EXIT PRIORITY (data-validated):
-1. Take Profit: +0.20% (KEEP)
-2. Stop Loss: -0.12% (KEEP)
-3. MICRO PROFIT: +0.05% with OB weakening (PROMOTED - 100% win rate)
-4. OB Flip: Orderbook flipped against position (KEEP)
-5. Delta Negative: SOFTENED - requires sustained delta OR OB flip
-6. Time Stop: 60s fallback (KEEP)
+1. Take Profit: +0.20% (rare but dominant)
+2. Micro Profit: +0.05% with OB weakening (primary income - 100% win rate)
+3. OB Flip: Orderbook flipped against position (edge decay)
+4. Stop Loss: -0.12% (risk cap)
+5. Time Stop: 60s fallback (last resort)
 
-DISABLED EXITS (data-proven losers):
-- NO_MOVEMENT: 0% win rate in 54 trades - COMPLETELY DISABLED
+DISABLED EXITS (data-proven negative expectancy):
+- DELTA_NEGATIVE: -4.70% weekly loss (115 trades) - DISABLED
+- NO_MOVEMENT: 0% win rate in 54 trades - DISABLED
 - FLOW_NEUTRAL: Low win rate - DISABLED
 - CONFIRMATION_TIMEOUT: Covered by time_stop - DISABLED
 
@@ -457,42 +457,14 @@ class ExecutionEngine:
         # Data showed 6.3% win rate when triggering too early - now require confirmation
         if trade_flow:
             current_delta = trade_flow.get("delta_1s", 0)
-            entry_delta = self.entry_delta.get(position.symbol, 0)
-            delta_against = False
-
-            if position.side == SignalType.LONG:
-                delta_against = entry_delta > 0 and current_delta < -abs(entry_delta) * 0.5
-            else:
-                delta_against = entry_delta < 0 and current_delta > abs(entry_delta) * 0.5
-
-            if delta_against:
-                # Track when delta first turned against us
-                if position.symbol not in self.delta_negative_start:
-                    self.delta_negative_start[position.symbol] = time.time()
-
-                # Check if sustained for 3+ seconds
-                delta_negative_time = time.time() - self.delta_negative_start[position.symbol]
-
-                # Also check if OB has flipped (combo confirmation)
-                ob_also_flipped = False
-                if orderbook:
-                    current_imbalance = orderbook.imbalance_ratio
-                    if position.side == SignalType.LONG and current_imbalance < 0.4:
-                        ob_also_flipped = True
-                    elif position.side == SignalType.SHORT and current_imbalance > 0.6:
-                        ob_also_flipped = True
-
-                # Exit only if SUSTAINED (3s+) OR combo with OB flip
-                if delta_negative_time >= self.delta_negative_duration or ob_also_flipped:
-                    logger.info(
-                        f"{position.symbol} DELTA NEGATIVE (sustained {delta_negative_time:.1f}s, ob_flip={ob_also_flipped}): "
-                        f"{entry_delta:.0f} -> {current_delta:.0f}"
-                    )
-                    self.delta_negative_start.pop(position.symbol, None)  # Clean up
-                    return ExitReason.DELTA_NEGATIVE
-            else:
-                # Delta recovered, reset the timer
-                self.delta_negative_start.pop(position.symbol, None)
+            # ============================================================
+            # DELTA_NEGATIVE: DISABLED (2025-12-31)
+            # Reason: -4.70% weekly loss on 115 trades
+            # Data proves negative expectancy - do not re-enable
+            # ============================================================
+            # entry_delta = self.entry_delta.get(position.symbol, 0)
+            # delta_against logic removed - was causing majority of losses
+            pass  # Placeholder to maintain code structure
 
         # 5. Spread Widen: Spread widened >2x from entry
         if orderbook:
@@ -506,11 +478,12 @@ class ExecutionEngine:
                 return ExitReason.SPREAD_WIDEN
 
         # ============================================================
-        # DISABLED EXITS (data-proven losers - DO NOT RE-ENABLE)
+        # DISABLED EXITS (data-proven negative expectancy - DO NOT RE-ENABLE)
         # ============================================================
-        # CONFIRMATION_TIMEOUT: 0% win rate - DISABLED
-        # FLOW_NEUTRAL: Low win rate - DISABLED
+        # DELTA_NEGATIVE: -4.70% weekly, 115 trades - DISABLED 2025-12-31
         # NO_MOVEMENT: 0% win rate in 54 trades - DISABLED
+        # FLOW_NEUTRAL: Low win rate - DISABLED
+        # CONFIRMATION_TIMEOUT: 0% win rate - DISABLED
         # ============================================================
 
         # 7. Time Stop (fallback): Keep as ultimate backstop

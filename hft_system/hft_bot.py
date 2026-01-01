@@ -5,8 +5,8 @@ Main entry point for the HFT trading system.
 
 # ============================================================
 # STRATEGY LOCKED — DO NOT MODIFY
-# Validation phase: stability testing
-# Last update: 2025-12-26
+# Validation phase: edge preservation
+# Last update: 2025-12-31
 # ============================================================
 
 Combines all components:
@@ -16,13 +16,13 @@ Combines all components:
 - Execution Engine: Trade execution with TP/SL/Time stops
 - Trade Logger: Persistent logging for analysis
 
-LOCKED CONFIGURATION (data-validated from 332 trades):
-- Enabled exits: TP, SL, MICRO_PROFIT, OB_FLIP, DELTA_NEGATIVE (softened), TIME_STOP
-- Disabled exits: NO_MOVEMENT (0% win), FLOW_NEUTRAL, CONFIRMATION_TIMEOUT
+LOCKED CONFIGURATION (data-validated):
+- Enabled exits: TP, MICRO_PROFIT, OB_FLIP, TIME_STOP, SL
+- Disabled exits: DELTA_NEGATIVE (-4.70% weekly), NO_MOVEMENT (0% win), FLOW_NEUTRAL
 - Allowed regimes: low_vol_chop, high_vol_trend, mean_reversion
 - Blocked regimes: liquidity_vacuum, news_spike, unknown
 - Allowed symbols: SUI, XRP (ATOM disabled - 0% win rate)
-- Confidence: HIGH always, MEDIUM if daily_pnl > 0, LOW disabled
+- Confidence: HIGH always, MEDIUM if daily_pnl >= 0, LOW disabled
 
 Usage:
     python -m hft_system.hft_bot [--live] [--capital 10000]
@@ -113,8 +113,20 @@ class HFTBot:
         self.sizing_decisions: dict = {}  # symbol -> last sizing decision
 
         logger.info("=" * 60)
-        logger.info("STRATEGY LOCKED - STABILITY TESTING PHASE")
+        logger.info("STRATEGY LOCKED - EDGE PRESERVATION PHASE")
         logger.info("=" * 60)
+
+        # DEPLOY_MARKER for tracking deployments
+        import subprocess
+        try:
+            git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
+                                                stderr=subprocess.DEVNULL).decode().strip()
+        except:
+            git_hash = "unknown"
+        deploy_time = int(datetime.utcnow().timestamp() * 1000)
+        enabled_exits = "take_profit,micro_profit,ob_flip,spread_widen,time_stop,stop_loss"
+        logger.info(f"DEPLOY_MARKER commit={git_hash} time={deploy_time} exits=[{enabled_exits}]")
+
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
         logger.info(f"  Capital: ${self.capital:,.2f}")
@@ -127,13 +139,13 @@ class HFTBot:
         # Exit configuration
         asset_config = get_asset_config(SYSTEM_CONFIG.enabled_assets[0])
         logger.info(f"EXITS (enabled):")
-        logger.info(f"  Take Profit: +{asset_config.take_profit_pct}%")
-        logger.info(f"  Stop Loss: -{asset_config.stop_loss_pct}%")
-        logger.info(f"  Micro Profit: +0.05% with OB weakening (100% win rate)")
+        logger.info(f"  Take Profit: +{asset_config.take_profit_pct}% (rare but dominant)")
+        logger.info(f"  Micro Profit: +0.05% with OB weakening (primary income)")
         logger.info(f"  OB Flip: Orderbook flipped against position")
-        logger.info(f"  Delta Negative: SOFTENED (3s sustained OR OB combo)")
         logger.info(f"  Time Stop: {asset_config.time_stop_seconds}s fallback")
-        logger.info(f"EXITS (disabled - 0% or low win rate):")
+        logger.info(f"  Stop Loss: -{asset_config.stop_loss_pct}% (risk cap)")
+        logger.info(f"EXITS (disabled - negative expectancy):")
+        logger.info(f"  DELTA_NEGATIVE: DISABLED (-4.70% weekly, 115 trades)")
         logger.info(f"  NO_MOVEMENT: DISABLED (0% win in 54 trades)")
         logger.info(f"  FLOW_NEUTRAL: DISABLED")
         logger.info(f"  CONFIRMATION_TIMEOUT: DISABLED")
