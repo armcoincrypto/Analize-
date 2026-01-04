@@ -428,6 +428,84 @@ def main():
         for imb, stats in sorted_imb:
             print(f"    {imb:<20} avg={stats['avg_pnl']:>8.4f}% n={stats['n']:>3}")
 
+    # ============================================================
+    # GATE COMPLIANCE CHECK
+    # ============================================================
+    print(f"\n{'='*70}")
+    print(f" WINNER GATE COMPLIANCE CHECK")
+    print(f"{'='*70}")
+
+    cursor = conn.cursor()
+
+    # Check blocked signals by winner_gate
+    cursor.execute("""
+        SELECT COUNT(*) FROM blocked_signals
+        WHERE block_reason = 'winner_gate'
+        AND timestamp > ?
+    """, (args.since,))
+    gate_blocked = cursor.fetchone()[0]
+
+    # Check trades that passed gate
+    cursor.execute("""
+        SELECT COUNT(*) FROM trades
+        WHERE entry_time > ? AND status = 'closed'
+    """, (args.since,))
+    trades_passed = cursor.fetchone()[0]
+
+    print(f"\n  Signals blocked by winner_gate: {gate_blocked}")
+    print(f"  Trades executed (passed gate):   {trades_passed}")
+
+    # Check for forbidden buckets in executed trades
+    print(f"\n  GATE RULE VIOLATIONS (should be 0):")
+
+    # Check mean_reversion trades
+    cursor.execute("""
+        SELECT COUNT(*) FROM enriched_trades
+        WHERE entry_time > ?
+        AND (ps_regime = 'mean_reversion' OR regime_at_entry = 'mean_reversion')
+    """, (args.since,))
+    mean_rev_trades = cursor.fetchone()[0]
+    status = "✓ PASS" if mean_rev_trades == 0 else "✗ VIOLATION"
+    print(f"    mean_reversion trades: {mean_rev_trades} {status}")
+
+    # Check MEDIUM tier trades
+    cursor.execute("""
+        SELECT COUNT(*) FROM enriched_trades
+        WHERE entry_time > ?
+        AND confidence_tier = 'medium'
+    """, (args.since,))
+    medium_trades = cursor.fetchone()[0]
+    status = "✓ PASS" if medium_trades == 0 else "✗ VIOLATION"
+    print(f"    MEDIUM tier trades:    {medium_trades} {status}")
+
+    # Check imbalance < 0.75 trades
+    cursor.execute("""
+        SELECT COUNT(*) FROM enriched_trades
+        WHERE entry_time > ?
+        AND COALESCE(ps_imbalance, 0) < 0.75
+        AND COALESCE(ps_imbalance, 0) > 0
+    """, (args.since,))
+    low_imb_trades = cursor.fetchone()[0]
+    status = "✓ PASS" if low_imb_trades == 0 else "✗ VIOLATION"
+    print(f"    imbalance < 0.75:      {low_imb_trades} {status}")
+
+    # Check low_vol_chop trades (blocked in strict mode)
+    cursor.execute("""
+        SELECT COUNT(*) FROM enriched_trades
+        WHERE entry_time > ?
+        AND (ps_regime = 'low_vol_chop' OR regime_at_entry = 'low_vol_chop')
+    """, (args.since,))
+    chop_trades = cursor.fetchone()[0]
+    status = "✓ PASS" if chop_trades == 0 else "✗ VIOLATION (strict mode)"
+    print(f"    low_vol_chop trades:   {chop_trades} {status}")
+
+    # Summary
+    total_violations = mean_rev_trades + medium_trades + low_imb_trades + chop_trades
+    if total_violations == 0:
+        print(f"\n  ✓ GATE FULLY COMPLIANT - All trades in approved pocket")
+    else:
+        print(f"\n  ✗ {total_violations} VIOLATIONS - Check gate implementation")
+
     conn.close()
 
     print(f"\n{'#'*70}")

@@ -145,6 +145,42 @@ class SystemConfig:
     min_entry_conditions: int = 1
 
 
+# ============================================================
+# WINNER GATE v1 — Data-validated entry filter
+# ============================================================
+# Based on 100 trades post-deploy analysis:
+#   BEST BUCKET: high_vol_trend + imb_0.75+ (50% win, +0.0057%)
+#   WORST: mean_reversion (-0.0514%), MEDIUM tier (-0.0410%)
+#
+# Gate blocks entries that don't match proven profitable patterns.
+# ============================================================
+@dataclass
+class WinnerGateConfig:
+    """Winner Gate v1 - Only trade in the profitable pocket."""
+
+    # Master switch
+    enabled: bool = True
+
+    # Strict mode: only allow high_vol_trend (the ONLY positive bucket)
+    strict_mode: bool = True
+
+    # Regime filter
+    allowed_regimes: List[str] = field(default_factory=lambda: ["high_vol_trend"])
+    blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "low_vol_chop", "liquidity_vacuum", "news_spike", "unknown"])
+
+    # Confidence tier filter (HIGH = 28.7% win, MEDIUM = 7.7% win)
+    min_confidence_tier: str = "high"  # Block medium/low
+
+    # Imbalance filter (0.75+ = 30.8% win, best bucket)
+    min_imbalance: float = 0.75
+
+    # Spread filter (all trades were <0.01%, no filtering needed yet)
+    max_spread_pct: float = 0.05  # Very loose, can tighten later
+
+
+WINNER_GATE = WinnerGateConfig()
+
+
 # Global configs
 RISK_CONFIG = RiskConfig()
 SYSTEM_CONFIG = SystemConfig()

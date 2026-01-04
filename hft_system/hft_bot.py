@@ -35,7 +35,7 @@ import sys
 import argparse
 from datetime import datetime
 
-from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config
+from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config, WINNER_GATE
 from .websocket_manager import WebSocketManager
 from .signal_engine import SignalEngine
 from .risk_controller import RiskController, ConfidenceTier, ConfidenceScore
@@ -125,7 +125,10 @@ class HFTBot:
             git_hash = "unknown"
         deploy_time = int(datetime.utcnow().timestamp() * 1000)
         enabled_exits = "take_profit,micro_profit,ob_flip,spread_widen,time_stop,stop_loss"
-        logger.info(f"DEPLOY_MARKER commit={git_hash} time={deploy_time} exits=[{enabled_exits}]")
+        gate_status = f"winner_gate={'ON' if WINNER_GATE.enabled else 'OFF'}"
+        if WINNER_GATE.enabled:
+            gate_status += f",strict={WINNER_GATE.strict_mode},min_imb={WINNER_GATE.min_imbalance},tier={WINNER_GATE.min_confidence_tier}"
+        logger.info(f"DEPLOY_MARKER commit={git_hash} time={deploy_time} exits=[{enabled_exits}] {gate_status}")
 
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
@@ -163,6 +166,16 @@ class HFTBot:
         logger.info(f"    - After loss (PnL<0): BLOCKED (contraction)")
         logger.info(f"    - After win (PnL>0): ALLOWED (expansion)")
         logger.info(f"  LOW (14.0% win): ALWAYS BLOCKED")
+
+        # Winner Gate v1 configuration
+        logger.info(f"WINNER GATE v1 (Data-validated):")
+        logger.info(f"  Enabled: {WINNER_GATE.enabled}")
+        if WINNER_GATE.enabled:
+            logger.info(f"  Strict Mode: {WINNER_GATE.strict_mode} (only high_vol_trend)")
+            logger.info(f"  Min Confidence: {WINNER_GATE.min_confidence_tier}")
+            logger.info(f"  Min Imbalance: {WINNER_GATE.min_imbalance}")
+            logger.info(f"  Max Spread: {WINNER_GATE.max_spread_pct}%")
+            logger.info(f"  Expected: Only trades in [high_vol_trend + imb>=0.75 + HIGH tier]")
         logger.info("=" * 60)
 
     async def _on_signal(self, signal):
@@ -257,6 +270,59 @@ class HFTBot:
 
         # Store sizing decision
         self.sizing_decisions[signal.symbol] = confidence
+
+        # ============================================================
+        # WINNER GATE v1 - Data-validated entry filter
+        # ============================================================
+        # Based on 100 trades analysis:
+        #   BEST: high_vol_trend + imb_0.75+ (50% win, +0.0057%)
+        #   WORST: mean_reversion (-0.0514%), MEDIUM tier (-0.0410%)
+        # ============================================================
+        if WINNER_GATE.enabled:
+            current_imbalance = orderbook_data.get("imbalance", 0.5)
+            current_spread = orderbook_data.get("spread_pct", 0)
+            tier_str = confidence.tier.value if hasattr(confidence.tier, 'value') else str(confidence.tier).lower()
+
+            gate_blocked = False
+            gate_reason = ""
+
+            # Check regime (strict mode: only high_vol_trend)
+            if WINNER_GATE.strict_mode:
+                if current_regime != "high_vol_trend":
+                    gate_blocked = True
+                    gate_reason = f"regime={current_regime} (strict: only high_vol_trend)"
+            elif current_regime in WINNER_GATE.blocked_regimes:
+                gate_blocked = True
+                gate_reason = f"regime={current_regime} (blocked)"
+
+            # Check confidence tier (require HIGH)
+            if not gate_blocked and tier_str != WINNER_GATE.min_confidence_tier:
+                gate_blocked = True
+                gate_reason = f"tier={tier_str} (require {WINNER_GATE.min_confidence_tier})"
+
+            # Check imbalance (require >= 0.75)
+            if not gate_blocked and current_imbalance < WINNER_GATE.min_imbalance:
+                gate_blocked = True
+                gate_reason = f"imbalance={current_imbalance:.3f} (require >= {WINNER_GATE.min_imbalance})"
+
+            # Check spread (max allowed)
+            if not gate_blocked and current_spread > WINNER_GATE.max_spread_pct:
+                gate_blocked = True
+                gate_reason = f"spread={current_spread:.4f}% (max {WINNER_GATE.max_spread_pct}%)"
+
+            if gate_blocked:
+                logger.info(f"WINNER_GATE BLOCK: {signal.symbol} - {gate_reason}")
+                self.trade_logger.log_blocked_signal(
+                    symbol=signal.symbol,
+                    signal_type=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    block_reason="winner_gate",
+                    block_details=f"Gate block: {gate_reason} | tier={tier_str}, regime={current_regime}, imb={current_imbalance:.3f}, spread={current_spread:.4f}%",
+                    market_conditions=orderbook_data,
+                    regime=current_regime
+                )
+                self.signals_blocked += 1
+                return
 
         # ============================================================
         # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)
