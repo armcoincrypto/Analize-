@@ -473,10 +473,11 @@ class HFTBot:
                         "adjustment_reason": risk_decision.size_adjustment_reason,
                         "reasoning": confidence.reasoning
                     }
+                    # Use same snapshot values from gate check, not live orderbook
                     context_data = {
                         "regime": entry_regime,
-                        "orderbook_imbalance": orderbook.imbalance_ratio if orderbook else 0,
-                        "spread_pct": orderbook.spread if orderbook else 0,
+                        "orderbook_imbalance": orderbook_data.get("imbalance", 0),
+                        "spread_pct": orderbook_data.get("spread_pct", 0),
                         "primary_cause": "orderbook_imbalance"
                     }
                     self.trade_logger.log_position_sizing(
