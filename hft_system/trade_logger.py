@@ -511,6 +511,33 @@ class TradeLogger:
             )
         """)
 
+        # RESEARCH_GATE: Winner gate blocks tracking for threshold tuning
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS winner_gate_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+
+                -- Block reason
+                block_reason TEXT NOT NULL,
+
+                -- Market conditions at block time
+                regime TEXT,
+                confidence_tier TEXT,
+                imbalance REAL,
+                spread_pct REAL,
+
+                -- For analyzing what we missed
+                entry_price REAL,
+                signal_type TEXT,
+
+                -- Research mode flag
+                research_mode INTEGER DEFAULT 0,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -541,6 +568,9 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_position_sizing_trade_id ON position_sizing(trade_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_position_sizing_symbol ON position_sizing(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_position_sizing_tier ON position_sizing(confidence_tier)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_winner_gate_blocks_timestamp ON winner_gate_blocks(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_winner_gate_blocks_symbol ON winner_gate_blocks(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_winner_gate_blocks_reason ON winner_gate_blocks(block_reason)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -1825,6 +1855,45 @@ class TradeLogger:
             ))
             self.conn.commit()
             logger.debug(f"Blocked signal logged: {symbol} - {block_reason}")
+        except Exception as e:
+            pass  # Silently ignore database lock errors
+
+    def log_winner_gate_block(
+        self,
+        symbol: str,
+        signal_type: str,
+        entry_price: float,
+        block_reason: str,
+        regime: str,
+        confidence_tier: str,
+        imbalance: float,
+        spread_pct: float,
+        research_mode: bool = False
+    ):
+        """
+        RESEARCH_GATE: Log a signal blocked by winner gate for threshold analysis.
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO winner_gate_blocks (
+                    timestamp, symbol, block_reason, regime,
+                    confidence_tier, imbalance, spread_pct,
+                    entry_price, signal_type, research_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(time.time() * 1000),
+                symbol,
+                block_reason,
+                regime,
+                confidence_tier,
+                imbalance,
+                spread_pct,
+                entry_price,
+                signal_type,
+                1 if research_mode else 0
+            ))
+            self.conn.commit()
         except Exception as e:
             pass  # Silently ignore database lock errors
 

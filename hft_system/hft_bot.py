@@ -32,6 +32,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 import argparse
 from datetime import datetime
 
@@ -112,6 +113,12 @@ class HFTBot:
         self.enable_adaptive_sizing = True  # Use confidence-based sizing
         self.sizing_decisions: dict = {}  # symbol -> last sizing decision
 
+        # RESEARCH_GATE: Probe protections for paper mode
+        # Set research mode based on paper/live trading mode
+        self.research_mode = (self.mode == TradingMode.PAPER)
+        self.last_trade_times: dict = {}  # symbol -> timestamp of last trade
+        self.hourly_trade_counts: dict = {}  # symbol -> {hour: count}
+
         logger.info("=" * 60)
         logger.info("STRATEGY LOCKED - EDGE PRESERVATION PHASE")
         logger.info("=" * 60)
@@ -127,7 +134,11 @@ class HFTBot:
         enabled_exits = "take_profit,micro_profit,ob_flip,spread_widen,time_stop,stop_loss"
         gate_status = f"winner_gate={'ON' if WINNER_GATE.enabled else 'OFF'}"
         if WINNER_GATE.enabled:
-            gate_status += f",strict={WINNER_GATE.strict_mode},min_imb={WINNER_GATE.min_imbalance},tier={WINNER_GATE.min_confidence_tier}"
+            if self.research_mode:
+                gate_status += f",research_mode=ON,tiers={WINNER_GATE.research_allowed_tiers},min_imb={WINNER_GATE.research_min_imbalance}"
+            else:
+                gate_status += f",strict={WINNER_GATE.strict_mode},min_imb={WINNER_GATE.min_imbalance},tier={WINNER_GATE.min_confidence_tier}"
+            gate_status += f",rate_limit={WINNER_GATE.max_trades_per_symbol_per_hour}/hr,cooldown={WINNER_GATE.min_seconds_between_trades_per_symbol}s"
         logger.info(f"DEPLOY_MARKER commit={git_hash} time={deploy_time} exits=[{enabled_exits}] {gate_status}")
 
         logger.info(f"HFT Bot initialized")
@@ -274,55 +285,103 @@ class HFTBot:
         # ============================================================
         # WINNER GATE v1 - Data-validated entry filter
         # ============================================================
-        # Based on 100 trades analysis:
-        #   BEST: high_vol_trend + imb_0.75+ (50% win, +0.0057%)
-        #   WORST: mean_reversion (-0.0514%), MEDIUM tier (-0.0410%)
+        # RESEARCH_GATE: Relaxed settings for paper mode data collection
+        # STRICT MODE: Live trading with tight filters
         # ============================================================
         if WINNER_GATE.enabled:
             current_imbalance = orderbook_data.get("imbalance", 0.5)
             current_spread = orderbook_data.get("spread_pct", 0)
             tier_str = confidence.tier.value if hasattr(confidence.tier, 'value') else str(confidence.tier).lower()
+            current_time = time.time()
 
             gate_blocked = False
             gate_reason = ""
 
-            # Check regime (strict mode: only high_vol_trend)
-            if WINNER_GATE.strict_mode:
-                if current_regime != "high_vol_trend":
+            # Determine thresholds based on mode
+            if self.research_mode:
+                # RESEARCH MODE (paper): Relaxed for data collection
+                allowed_tiers = WINNER_GATE.research_allowed_tiers
+                min_imbalance = WINNER_GATE.research_min_imbalance
+                mode_label = "research"
+            else:
+                # STRICT MODE (live): Tight filters for profitable pocket only
+                allowed_tiers = [WINNER_GATE.min_confidence_tier]
+                min_imbalance = WINNER_GATE.min_imbalance
+                mode_label = "strict"
+
+            # === PROBE PROTECTION: Rate limiting per symbol ===
+            symbol = signal.symbol
+
+            # Check minimum time between trades
+            last_trade = self.last_trade_times.get(symbol, 0)
+            seconds_since_last = current_time - last_trade
+            if seconds_since_last < WINNER_GATE.min_seconds_between_trades_per_symbol:
+                gate_blocked = True
+                gate_reason = f"cooldown={seconds_since_last:.0f}s (min {WINNER_GATE.min_seconds_between_trades_per_symbol}s)"
+
+            # Check hourly trade count
+            if not gate_blocked:
+                current_hour = int(current_time // 3600)
+                if symbol not in self.hourly_trade_counts:
+                    self.hourly_trade_counts[symbol] = {}
+                hourly_counts = self.hourly_trade_counts[symbol]
+                # Clean old hours
+                hourly_counts = {h: c for h, c in hourly_counts.items() if h >= current_hour - 1}
+                self.hourly_trade_counts[symbol] = hourly_counts
+                current_hour_count = hourly_counts.get(current_hour, 0)
+                if current_hour_count >= WINNER_GATE.max_trades_per_symbol_per_hour:
                     gate_blocked = True
-                    gate_reason = f"regime={current_regime} (strict: only high_vol_trend)"
-            elif current_regime in WINNER_GATE.blocked_regimes:
-                gate_blocked = True
-                gate_reason = f"regime={current_regime} (blocked)"
+                    gate_reason = f"rate_limit={current_hour_count}/{WINNER_GATE.max_trades_per_symbol_per_hour} trades/hr"
 
-            # Check confidence tier (require HIGH)
-            if not gate_blocked and tier_str != WINNER_GATE.min_confidence_tier:
-                gate_blocked = True
-                gate_reason = f"tier={tier_str} (require {WINNER_GATE.min_confidence_tier})"
+            # === REGIME CHECK (same for both modes - high_vol_trend is the edge) ===
+            if not gate_blocked:
+                if WINNER_GATE.strict_mode:
+                    if current_regime != "high_vol_trend":
+                        gate_blocked = True
+                        gate_reason = f"regime={current_regime} (require high_vol_trend)"
+                elif current_regime in WINNER_GATE.blocked_regimes:
+                    gate_blocked = True
+                    gate_reason = f"regime={current_regime} (blocked)"
 
-            # Check imbalance (require >= 0.75)
-            if not gate_blocked and current_imbalance < WINNER_GATE.min_imbalance:
+            # === TIER CHECK (relaxed in research mode) ===
+            if not gate_blocked and tier_str not in allowed_tiers:
                 gate_blocked = True
-                gate_reason = f"imbalance={current_imbalance:.3f} (require >= {WINNER_GATE.min_imbalance})"
+                gate_reason = f"tier={tier_str} (require {allowed_tiers})"
 
-            # Check spread (max allowed)
+            # === IMBALANCE CHECK (relaxed in research mode) ===
+            if not gate_blocked and current_imbalance < min_imbalance:
+                gate_blocked = True
+                gate_reason = f"imbalance={current_imbalance:.3f} (require >= {min_imbalance})"
+
+            # === SPREAD CHECK ===
             if not gate_blocked and current_spread > WINNER_GATE.max_spread_pct:
                 gate_blocked = True
                 gate_reason = f"spread={current_spread:.4f}% (max {WINNER_GATE.max_spread_pct}%)"
 
             if gate_blocked:
-                logger.info(f"WINNER_GATE BLOCK: {signal.symbol} - {gate_reason}")
-                self.trade_logger.log_blocked_signal(
+                logger.info(f"WINNER_GATE BLOCK [{mode_label}]: {signal.symbol} - {gate_reason}")
+                # Log to winner_gate_blocks table for analysis
+                self.trade_logger.log_winner_gate_block(
                     symbol=signal.symbol,
                     signal_type=signal.signal_type.value,
                     entry_price=signal.entry_price,
-                    block_reason="winner_gate",
-                    block_details=f"Gate block: {gate_reason} | tier={tier_str}, regime={current_regime}, imb={current_imbalance:.3f}, spread={current_spread:.4f}%",
-                    market_conditions=orderbook_data,
-                    regime=current_regime
+                    block_reason=gate_reason,
+                    regime=current_regime,
+                    confidence_tier=tier_str,
+                    imbalance=current_imbalance,
+                    spread_pct=current_spread,
+                    research_mode=self.research_mode
                 )
                 self.signals_blocked += 1
                 return
+
+            # === GATE PASSED: Update rate limiting trackers ===
+            self.last_trade_times[symbol] = current_time
+            current_hour = int(current_time // 3600)
+            if symbol not in self.hourly_trade_counts:
+                self.hourly_trade_counts[symbol] = {}
+            self.hourly_trade_counts[symbol][current_hour] = self.hourly_trade_counts[symbol].get(current_hour, 0) + 1
+            logger.info(f"WINNER_GATE PASS [{mode_label}]: {signal.symbol} | regime={current_regime}, tier={tier_str}, imb={current_imbalance:.3f}")
 
         # ============================================================
         # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)

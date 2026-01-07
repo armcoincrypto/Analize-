@@ -161,21 +161,35 @@ class WinnerGateConfig:
     # Master switch
     enabled: bool = True
 
+    # RESEARCH_GATE: Relaxed settings for paper mode data collection
+    # When True (paper mode): allow medium tier, lower imbalance threshold
+    # When False (live mode): strict settings only
+    research_mode: bool = True  # Auto-set based on SYSTEM_CONFIG.mode
+
     # Strict mode: only allow high_vol_trend (the ONLY positive bucket)
     strict_mode: bool = True
 
-    # Regime filter
+    # Regime filter (same for both modes - high_vol_trend is the edge)
     allowed_regimes: List[str] = field(default_factory=lambda: ["high_vol_trend"])
     blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "low_vol_chop", "liquidity_vacuum", "news_spike", "unknown"])
 
+    # === STRICT MODE SETTINGS (live trading) ===
     # Confidence tier filter (HIGH = 28.7% win, MEDIUM = 7.7% win)
     min_confidence_tier: str = "high"  # Block medium/low
-
     # Imbalance filter (0.75+ = 30.8% win, best bucket)
     min_imbalance: float = 0.75
 
+    # === RESEARCH MODE SETTINGS (paper trading) ===
+    # Relaxed to collect more data while still in best regime
+    research_allowed_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])
+    research_min_imbalance: float = 0.70  # Slightly relaxed
+
     # Spread filter (all trades were <0.01%, no filtering needed yet)
     max_spread_pct: float = 0.05  # Very loose, can tighten later
+
+    # === PROBE PROTECTIONS (prevent overtrading in research mode) ===
+    max_trades_per_symbol_per_hour: int = 2
+    min_seconds_between_trades_per_symbol: int = 300  # 5 minutes
 
 
 WINNER_GATE = WinnerGateConfig()
