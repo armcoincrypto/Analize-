@@ -106,6 +106,71 @@ class RiskConfig:
     max_exchange_latency_ms: int = 500  # Disable if latency >500ms
 
 
+# ============================================================
+# COST MODEL - Realistic trading costs simulation
+# ============================================================
+# Expert feedback: "Your target edge is 0.01-0.02% which is below
+# real trading costs. Must simulate fees + spread + slippage."
+# ============================================================
+@dataclass
+class CostModelConfig:
+    """Realistic cost model for paper trading evaluation."""
+
+    # Enable cost model (subtract from PnL)
+    enabled: bool = True
+
+    # Taker fees (Binance spot standard)
+    # Adjust based on your account tier (VIP levels)
+    entry_fee_pct: float = 0.10  # 0.10% taker fee
+    exit_fee_pct: float = 0.10   # 0.10% taker fee
+
+    # Spread cost (half-spread paid on entry and exit)
+    # Estimated based on typical SUI/XRP spreads
+    spread_cost_pct: float = 0.02  # ~0.02% typical spread
+
+    # Slippage model
+    # When OB "looks good" but disappears on execution
+    base_slippage_pct: float = 0.01  # Base slippage
+    imbalance_slippage_factor: float = 0.02  # Extra slippage when imbalance is extreme
+
+    # Total estimated cost per round-trip:
+    # 2 * 0.10% (fees) + 2 * 0.02% (spread) + 0.01% (slippage) = 0.25%
+    # This means edge must be > 0.25% to profit!
+
+
+COST_MODEL = CostModelConfig()
+
+
+# ============================================================
+# REGIME HYSTERESIS - Stable regime classification
+# ============================================================
+# Expert feedback: "Regime flips every ~30s. That means regime
+# label is noisy, gate blocks constantly. Add hysteresis."
+# ============================================================
+@dataclass
+class RegimeHysteresisConfig:
+    """Stable regime classification with confirmation requirements."""
+
+    enabled: bool = True
+
+    # Confirmations required to ENTER a new regime
+    # Regime must be detected N consecutive times to switch
+    enter_confirmations: int = 3
+
+    # Failures required to EXIT current regime
+    # Current regime must fail M times before switching
+    exit_failures: int = 3
+
+    # Minimum time in regime before allowing switch (seconds)
+    min_regime_duration_sec: float = 30.0
+
+    # Log both raw and stable regimes for analysis
+    log_raw_regime: bool = True
+
+
+REGIME_HYSTERESIS = RegimeHysteresisConfig()
+
+
 @dataclass
 class SystemConfig:
     """Overall system configuration."""
@@ -146,48 +211,53 @@ class SystemConfig:
 
 
 # ============================================================
-# WINNER GATE v1 — Data-validated entry filter
+# WINNER GATE v2 — Dual-Pocket Entry Filter
 # ============================================================
-# Based on 100 trades post-deploy analysis:
-#   BEST BUCKET: high_vol_trend + imb_0.75+ (50% win, +0.0057%)
-#   WORST: mean_reversion (-0.0514%), MEDIUM tier (-0.0410%)
+# Expert feedback: "Use a 2-layer gate - primary for best regime,
+# secondary allows some trades in low_vol_chop with extra confirmation"
 #
-# Gate blocks entries that don't match proven profitable patterns.
+# POCKET A (Primary): high_vol_trend + HIGH/MEDIUM tier + imb>=0.70
+# POCKET B (Secondary): low_vol_chop + imb>=0.80 + tight spread + high depth
 # ============================================================
 @dataclass
 class WinnerGateConfig:
-    """Winner Gate v1 - Only trade in the profitable pocket."""
+    """Winner Gate v2 - Dual-pocket entry filter."""
 
     # Master switch
     enabled: bool = True
 
     # RESEARCH_GATE: Relaxed settings for paper mode data collection
-    # When True (paper mode): allow medium tier, lower imbalance threshold
-    # When False (live mode): strict settings only
     research_mode: bool = True  # Auto-set based on SYSTEM_CONFIG.mode
 
-    # Strict mode: only allow high_vol_trend (the ONLY positive bucket)
-    strict_mode: bool = True
+    # === POCKET A: PRIMARY (high_vol_trend - the proven edge) ===
+    pocket_a_enabled: bool = True
+    pocket_a_regimes: List[str] = field(default_factory=lambda: ["high_vol_trend"])
+    pocket_a_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])
+    pocket_a_min_imbalance: float = 0.70
+    pocket_a_max_spread_pct: float = 0.05
 
-    # Regime filter (same for both modes - high_vol_trend is the edge)
-    allowed_regimes: List[str] = field(default_factory=lambda: ["high_vol_trend"])
-    blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "low_vol_chop", "liquidity_vacuum", "news_spike", "unknown"])
+    # === POCKET B: SECONDARY (low_vol_chop with extra confirmation) ===
+    # Only trade in chop if conditions are exceptionally strong
+    pocket_b_enabled: bool = True  # Enable secondary pocket
+    pocket_b_regimes: List[str] = field(default_factory=lambda: ["low_vol_chop"])
+    pocket_b_tiers: List[str] = field(default_factory=lambda: ["high"])  # HIGH only
+    pocket_b_min_imbalance: float = 0.80  # Much stricter
+    pocket_b_max_spread_pct: float = 0.02  # Tight spread required
+    pocket_b_min_depth: float = 10000.0  # Minimum OB depth (USD)
+    pocket_b_flow_confirm_sec: float = 2.0  # Flow must confirm for 2 seconds
 
-    # === STRICT MODE SETTINGS (live trading) ===
-    # Confidence tier filter (HIGH = 28.7% win, MEDIUM = 7.7% win)
-    min_confidence_tier: str = "high"  # Block medium/low
-    # Imbalance filter (0.75+ = 30.8% win, best bucket)
+    # === BLOCKED REGIMES (never trade) ===
+    blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "liquidity_vacuum", "news_spike", "unknown"])
+
+    # === LEGACY SETTINGS (for backward compatibility) ===
+    strict_mode: bool = True  # If True, only Pocket A in live mode
+    min_confidence_tier: str = "high"
     min_imbalance: float = 0.75
-
-    # === RESEARCH MODE SETTINGS (paper trading) ===
-    # Relaxed to collect more data while still in best regime
+    max_spread_pct: float = 0.05
     research_allowed_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])
-    research_min_imbalance: float = 0.70  # Slightly relaxed
+    research_min_imbalance: float = 0.70
 
-    # Spread filter (all trades were <0.01%, no filtering needed yet)
-    max_spread_pct: float = 0.05  # Very loose, can tighten later
-
-    # === PROBE PROTECTIONS (prevent overtrading in research mode) ===
+    # === PROBE PROTECTIONS (prevent overtrading) ===
     max_trades_per_symbol_per_hour: int = 2
     min_seconds_between_trades_per_symbol: int = 300  # 5 minutes
 

@@ -36,7 +36,7 @@ import time
 import argparse
 from datetime import datetime
 
-from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config, WINNER_GATE
+from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config, WINNER_GATE, COST_MODEL, REGIME_HYSTERESIS
 from .websocket_manager import WebSocketManager
 from .signal_engine import SignalEngine
 from .risk_controller import RiskController, ConfidenceTier, ConfidenceScore
@@ -119,6 +119,17 @@ class HFTBot:
         self.last_trade_times: dict = {}  # symbol -> timestamp of last trade
         self.hourly_trade_counts: dict = {}  # symbol -> {hour: count}
 
+        # REGIME HYSTERESIS: Stable regime classification
+        # Prevents regime from flipping on every tick
+        self.regime_raw: dict = {}  # symbol -> current raw regime detection
+        self.regime_stable: dict = {}  # symbol -> stable regime (after hysteresis)
+        self.regime_confirmations: dict = {}  # symbol -> {regime: consecutive_count}
+        self.regime_stable_since: dict = {}  # symbol -> timestamp when stable regime started
+        self.regime_failure_count: dict = {}  # symbol -> consecutive failures of current regime
+
+        # POCKET TRACKING: Which gate pocket allowed the trade
+        self.active_pocket: dict = {}  # symbol -> pocket_id for active trade
+
         logger.info("=" * 60)
         logger.info("STRATEGY LOCKED - EDGE PRESERVATION PHASE")
         logger.info("=" * 60)
@@ -134,12 +145,20 @@ class HFTBot:
         enabled_exits = "take_profit,micro_profit,ob_flip,spread_widen,time_stop,stop_loss"
         gate_status = f"winner_gate={'ON' if WINNER_GATE.enabled else 'OFF'}"
         if WINNER_GATE.enabled:
-            if self.research_mode:
-                gate_status += f",research_mode=ON,tiers={WINNER_GATE.research_allowed_tiers},min_imb={WINNER_GATE.research_min_imbalance}"
-            else:
-                gate_status += f",strict={WINNER_GATE.strict_mode},min_imb={WINNER_GATE.min_imbalance},tier={WINNER_GATE.min_confidence_tier}"
-            gate_status += f",rate_limit={WINNER_GATE.max_trades_per_symbol_per_hour}/hr,cooldown={WINNER_GATE.min_seconds_between_trades_per_symbol}s"
-        logger.info(f"DEPLOY_MARKER commit={git_hash} time={deploy_time} exits=[{enabled_exits}] {gate_status}")
+            gate_status += f",dual_pocket=A+B"
+            gate_status += f",pocket_a={WINNER_GATE.pocket_a_regimes},imb>={WINNER_GATE.pocket_a_min_imbalance}"
+            gate_status += f",pocket_b={'ON' if WINNER_GATE.pocket_b_enabled else 'OFF'}"
+            if WINNER_GATE.pocket_b_enabled:
+                gate_status += f",pocket_b_imb>={WINNER_GATE.pocket_b_min_imbalance}"
+            gate_status += f",rate_limit={WINNER_GATE.max_trades_per_symbol_per_hour}/hr"
+        cost_status = f"cost_model={'ON' if COST_MODEL.enabled else 'OFF'}"
+        if COST_MODEL.enabled:
+            total_cost = COST_MODEL.entry_fee_pct + COST_MODEL.exit_fee_pct + 2*COST_MODEL.spread_cost_pct + COST_MODEL.base_slippage_pct
+            cost_status += f",est_cost={total_cost:.3f}%"
+        hysteresis_status = f"hysteresis={'ON' if REGIME_HYSTERESIS.enabled else 'OFF'}"
+        if REGIME_HYSTERESIS.enabled:
+            hysteresis_status += f",enter={REGIME_HYSTERESIS.enter_confirmations},exit={REGIME_HYSTERESIS.exit_failures}"
+        logger.info(f"DEPLOY_MARKER commit={git_hash} time={deploy_time} exits=[{enabled_exits}] {gate_status} {cost_status} {hysteresis_status}")
 
         logger.info(f"HFT Bot initialized")
         logger.info(f"  Mode: {self.mode.value}")
@@ -188,6 +207,75 @@ class HFTBot:
             logger.info(f"  Max Spread: {WINNER_GATE.max_spread_pct}%")
             logger.info(f"  Expected: Only trades in [high_vol_trend + imb>=0.75 + HIGH tier]")
         logger.info("=" * 60)
+
+    def _apply_regime_hysteresis(self, symbol: str, raw_regime: str) -> str:
+        """
+        Apply hysteresis to regime classification to prevent rapid flipping.
+
+        Returns stable regime that requires N confirmations to enter
+        and M failures to exit.
+        """
+        if not REGIME_HYSTERESIS.enabled:
+            return raw_regime
+
+        current_time = time.time()
+
+        # Store raw regime for logging
+        self.regime_raw[symbol] = raw_regime
+
+        # Get current stable regime (or use raw if no stable yet)
+        stable_regime = self.regime_stable.get(symbol, raw_regime)
+
+        # Initialize tracking dicts if needed
+        if symbol not in self.regime_confirmations:
+            self.regime_confirmations[symbol] = {}
+        if symbol not in self.regime_failure_count:
+            self.regime_failure_count[symbol] = 0
+
+        # Check if raw matches stable
+        if raw_regime == stable_regime:
+            # Reset failure count since we're confirming current regime
+            self.regime_failure_count[symbol] = 0
+            return stable_regime
+
+        # Raw differs from stable - check if we should switch
+        # Increment confirmation count for new regime
+        if raw_regime not in self.regime_confirmations[symbol]:
+            self.regime_confirmations[symbol][raw_regime] = 0
+        self.regime_confirmations[symbol][raw_regime] += 1
+
+        # Increment failure count for current stable regime
+        self.regime_failure_count[symbol] += 1
+
+        # Check if new regime has enough confirmations AND old regime has enough failures
+        new_regime_confirmed = (
+            self.regime_confirmations[symbol][raw_regime] >= REGIME_HYSTERESIS.enter_confirmations
+        )
+        old_regime_failed = (
+            self.regime_failure_count[symbol] >= REGIME_HYSTERESIS.exit_failures
+        )
+
+        # Check minimum duration in current regime
+        stable_since = self.regime_stable_since.get(symbol, 0)
+        min_duration_met = (current_time - stable_since) >= REGIME_HYSTERESIS.min_regime_duration_sec
+
+        # Switch if all conditions met
+        if new_regime_confirmed and old_regime_failed and min_duration_met:
+            old_stable = stable_regime
+            self.regime_stable[symbol] = raw_regime
+            self.regime_stable_since[symbol] = current_time
+            self.regime_failure_count[symbol] = 0
+            # Reset all confirmation counts
+            self.regime_confirmations[symbol] = {}
+
+            if REGIME_HYSTERESIS.log_raw_regime:
+                logger.info(f"REGIME SWITCH [{symbol}]: {old_stable} -> {raw_regime} "
+                           f"(confirmed after {REGIME_HYSTERESIS.enter_confirmations} samples)")
+
+            return raw_regime
+
+        # Not enough confirmations yet - return stable regime
+        return stable_regime
 
     async def _on_signal(self, signal):
         """Handle new signal from signal engine."""
@@ -283,44 +371,39 @@ class HFTBot:
         self.sizing_decisions[signal.symbol] = confidence
 
         # ============================================================
-        # WINNER GATE v1 - Data-validated entry filter
+        # WINNER GATE v2 - Dual-Pocket Entry Filter
         # ============================================================
-        # RESEARCH_GATE: Relaxed settings for paper mode data collection
-        # STRICT MODE: Live trading with tight filters
+        # POCKET A: high_vol_trend + relaxed tier/imbalance (primary edge)
+        # POCKET B: low_vol_chop + stricter requirements (secondary)
         # ============================================================
         if WINNER_GATE.enabled:
             current_imbalance = orderbook_data.get("imbalance", 0.5)
             current_spread = orderbook_data.get("spread_pct", 0)
             tier_str = confidence.tier.value if hasattr(confidence.tier, 'value') else str(confidence.tier).lower()
             current_time = time.time()
-
-            gate_blocked = False
-            gate_reason = ""
-
-            # Determine thresholds based on mode
-            if self.research_mode:
-                # RESEARCH MODE (paper): Relaxed for data collection
-                allowed_tiers = WINNER_GATE.research_allowed_tiers
-                min_imbalance = WINNER_GATE.research_min_imbalance
-                mode_label = "research"
-            else:
-                # STRICT MODE (live): Tight filters for profitable pocket only
-                allowed_tiers = [WINNER_GATE.min_confidence_tier]
-                min_imbalance = WINNER_GATE.min_imbalance
-                mode_label = "strict"
-
-            # === PROBE PROTECTION: Rate limiting per symbol ===
             symbol = signal.symbol
+
+            # Get orderbook depth for Pocket B
+            ob_depth = 0
+            if orderbook:
+                ob_depth = (orderbook.bid_volume + orderbook.ask_volume) * signal.entry_price
+
+            gate_blocked = True  # Default to blocked, try each pocket
+            gate_reason = ""
+            pocket_id = None
+
+            # === PROBE PROTECTION: Rate limiting per symbol (applies to all pockets) ===
+            rate_limited = False
 
             # Check minimum time between trades
             last_trade = self.last_trade_times.get(symbol, 0)
             seconds_since_last = current_time - last_trade
             if seconds_since_last < WINNER_GATE.min_seconds_between_trades_per_symbol:
-                gate_blocked = True
+                rate_limited = True
                 gate_reason = f"cooldown={seconds_since_last:.0f}s (min {WINNER_GATE.min_seconds_between_trades_per_symbol}s)"
 
             # Check hourly trade count
-            if not gate_blocked:
+            if not rate_limited:
                 current_hour = int(current_time // 3600)
                 if symbol not in self.hourly_trade_counts:
                     self.hourly_trade_counts[symbol] = {}
@@ -330,36 +413,62 @@ class HFTBot:
                 self.hourly_trade_counts[symbol] = hourly_counts
                 current_hour_count = hourly_counts.get(current_hour, 0)
                 if current_hour_count >= WINNER_GATE.max_trades_per_symbol_per_hour:
-                    gate_blocked = True
+                    rate_limited = True
                     gate_reason = f"rate_limit={current_hour_count}/{WINNER_GATE.max_trades_per_symbol_per_hour} trades/hr"
 
-            # === REGIME CHECK (same for both modes - high_vol_trend is the edge) ===
-            if not gate_blocked:
-                if WINNER_GATE.strict_mode:
-                    if current_regime != "high_vol_trend":
-                        gate_blocked = True
-                        gate_reason = f"regime={current_regime} (require high_vol_trend)"
-                elif current_regime in WINNER_GATE.blocked_regimes:
-                    gate_blocked = True
-                    gate_reason = f"regime={current_regime} (blocked)"
-
-            # === TIER CHECK (relaxed in research mode) ===
-            if not gate_blocked and tier_str not in allowed_tiers:
+            if rate_limited:
                 gate_blocked = True
-                gate_reason = f"tier={tier_str} (require {allowed_tiers})"
+            else:
+                # === TRY POCKET A: high_vol_trend (primary edge) ===
+                if WINNER_GATE.pocket_a_enabled and current_regime in WINNER_GATE.pocket_a_regimes:
+                    pocket_a_pass = (
+                        tier_str in WINNER_GATE.pocket_a_tiers and
+                        current_imbalance >= WINNER_GATE.pocket_a_min_imbalance and
+                        current_spread <= WINNER_GATE.pocket_a_max_spread_pct
+                    )
+                    if pocket_a_pass:
+                        gate_blocked = False
+                        pocket_id = "A"
+                    else:
+                        # Log why Pocket A failed
+                        if tier_str not in WINNER_GATE.pocket_a_tiers:
+                            gate_reason = f"pocket_a: tier={tier_str} not in {WINNER_GATE.pocket_a_tiers}"
+                        elif current_imbalance < WINNER_GATE.pocket_a_min_imbalance:
+                            gate_reason = f"pocket_a: imb={current_imbalance:.3f} < {WINNER_GATE.pocket_a_min_imbalance}"
+                        else:
+                            gate_reason = f"pocket_a: spread={current_spread:.4f}% > {WINNER_GATE.pocket_a_max_spread_pct}%"
 
-            # === IMBALANCE CHECK (relaxed in research mode) ===
-            if not gate_blocked and current_imbalance < min_imbalance:
-                gate_blocked = True
-                gate_reason = f"imbalance={current_imbalance:.3f} (require >= {min_imbalance})"
+                # === TRY POCKET B: low_vol_chop with stricter requirements ===
+                if gate_blocked and WINNER_GATE.pocket_b_enabled and current_regime in WINNER_GATE.pocket_b_regimes:
+                    pocket_b_pass = (
+                        tier_str in WINNER_GATE.pocket_b_tiers and
+                        current_imbalance >= WINNER_GATE.pocket_b_min_imbalance and
+                        current_spread <= WINNER_GATE.pocket_b_max_spread_pct and
+                        ob_depth >= WINNER_GATE.pocket_b_min_depth
+                    )
+                    if pocket_b_pass:
+                        gate_blocked = False
+                        pocket_id = "B"
+                    else:
+                        # Log why Pocket B failed
+                        if tier_str not in WINNER_GATE.pocket_b_tiers:
+                            gate_reason = f"pocket_b: tier={tier_str} not in {WINNER_GATE.pocket_b_tiers}"
+                        elif current_imbalance < WINNER_GATE.pocket_b_min_imbalance:
+                            gate_reason = f"pocket_b: imb={current_imbalance:.3f} < {WINNER_GATE.pocket_b_min_imbalance}"
+                        elif current_spread > WINNER_GATE.pocket_b_max_spread_pct:
+                            gate_reason = f"pocket_b: spread={current_spread:.4f}% > {WINNER_GATE.pocket_b_max_spread_pct}%"
+                        else:
+                            gate_reason = f"pocket_b: depth=${ob_depth:.0f} < ${WINNER_GATE.pocket_b_min_depth:.0f}"
 
-            # === SPREAD CHECK ===
-            if not gate_blocked and current_spread > WINNER_GATE.max_spread_pct:
-                gate_blocked = True
-                gate_reason = f"spread={current_spread:.4f}% (max {WINNER_GATE.max_spread_pct}%)"
+                # === NO POCKET MATCHED: Check if regime is blocked entirely ===
+                if gate_blocked and not gate_reason:
+                    if current_regime in WINNER_GATE.blocked_regimes:
+                        gate_reason = f"regime={current_regime} (blocked)"
+                    else:
+                        gate_reason = f"regime={current_regime} (no pocket matches)"
 
             if gate_blocked:
-                logger.info(f"WINNER_GATE BLOCK [{mode_label}]: {signal.symbol} - {gate_reason}")
+                logger.info(f"WINNER_GATE BLOCK: {signal.symbol} - {gate_reason}")
                 # Log to winner_gate_blocks table for analysis
                 self.trade_logger.log_winner_gate_block(
                     symbol=signal.symbol,
@@ -375,13 +484,14 @@ class HFTBot:
                 self.signals_blocked += 1
                 return
 
-            # === GATE PASSED: Update rate limiting trackers ===
+            # === GATE PASSED: Update rate limiting trackers and store pocket_id ===
             self.last_trade_times[symbol] = current_time
             current_hour = int(current_time // 3600)
             if symbol not in self.hourly_trade_counts:
                 self.hourly_trade_counts[symbol] = {}
             self.hourly_trade_counts[symbol][current_hour] = self.hourly_trade_counts[symbol].get(current_hour, 0) + 1
-            logger.info(f"WINNER_GATE PASS [{mode_label}]: {signal.symbol} | regime={current_regime}, tier={tier_str}, imb={current_imbalance:.3f}")
+            self.active_pocket[symbol] = pocket_id
+            logger.info(f"WINNER_GATE PASS [Pocket {pocket_id}]: {signal.symbol} | regime={current_regime}, tier={tier_str}, imb={current_imbalance:.3f}")
 
         # ============================================================
         # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)
@@ -561,7 +671,22 @@ class HFTBot:
         """Handle position exit."""
         mfe = self.execution_engine.position_mfe.get(result.symbol, 0)
         mae = self.execution_engine.position_mae.get(result.symbol, 0)
-        self.trade_logger.log_trade_exit(result, mfe, mae)
+
+        # Get market conditions at exit for cost model
+        orderbook = self.ws_manager.get_orderbook(result.symbol)
+        spread_at_exit = orderbook.spread if orderbook else 0
+        imbalance_at_exit = orderbook.imbalance_ratio if orderbook else 0.5
+
+        # Get pocket_id that allowed this trade
+        pocket_id = self.active_pocket.pop(result.symbol, None)
+
+        # Log trade exit with cost model and pocket tracking
+        self.trade_logger.log_trade_exit(
+            result, mfe, mae,
+            spread_at_exit=spread_at_exit,
+            imbalance_at_exit=imbalance_at_exit,
+            pocket_id=pocket_id
+        )
 
         # TASK 10: Log regime at exit (before status changes to closed)
         exit_regime = self.current_regime.get(result.symbol, "unknown")
@@ -651,11 +776,16 @@ class HFTBot:
         logger.info("Initializing market regime classification...")
         for symbol in SYSTEM_CONFIG.enabled_assets:
             try:
-                regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
-                self.current_regime[symbol] = regime
+                raw_regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                # Apply hysteresis (will initialize stable regime on first call)
+                stable_regime = self._apply_regime_hysteresis(symbol, raw_regime)
+                self.current_regime[symbol] = stable_regime
                 self.regime_confidence[symbol] = confidence
+                # Initialize stable regime tracking
+                self.regime_stable[symbol] = stable_regime
+                self.regime_stable_since[symbol] = time.time()
                 # Skip DB logging at startup - let the scan loop handle it
-                logger.info(f"  {symbol}: regime={regime} (confidence={confidence:.2f})")
+                logger.info(f"  {symbol}: regime={stable_regime} (raw={raw_regime}, confidence={confidence:.2f})")
             except Exception as e:
                 logger.warning(f"  {symbol}: Failed to classify regime: {e}")
                 self.current_regime[symbol] = "unknown"
@@ -714,17 +844,18 @@ class HFTBot:
                     self.trade_logger.batch_commit()
 
                 # TASK 10: Classify market regime every 30 scans (30 seconds)
+                # Apply hysteresis to prevent rapid regime flipping
                 if scan_count % 30 == 0:
                     for symbol in SYSTEM_CONFIG.enabled_assets:
                         try:
-                            regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                            raw_regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                            # Apply hysteresis - only changes stable regime after N confirmations
+                            stable_regime = self._apply_regime_hysteresis(symbol, raw_regime)
                             old_regime = self.current_regime.get(symbol, "unknown")
-                            self.current_regime[symbol] = regime
+                            self.current_regime[symbol] = stable_regime
                             self.regime_confidence[symbol] = confidence
-                            self.trade_logger.log_market_regime(symbol, regime, metrics, confidence)
-                            # Log regime changes
-                            if old_regime != regime:
-                                logger.info(f"REGIME CHANGE: {symbol} {old_regime} -> {regime} (conf={confidence:.2f})")
+                            # Log with both raw and stable for analysis
+                            self.trade_logger.log_market_regime(symbol, stable_regime, metrics, confidence)
                         except Exception as e:
                             logger.warning(f"Regime classification failed for {symbol}: {e}")
 

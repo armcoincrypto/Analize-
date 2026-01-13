@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Post-Deploy Analysis Script v2
+Post-Deploy Analysis Script v3
 ==============================
 Analyzes trade data to find entry conditions that predict winning exits.
+Now includes NET-AFTER-COSTS analysis using the cost model.
 
 FIXED: Uses 2-second timestamp tolerance to join trades with position_sizing
        and trade_causality tables (timestamps differ by ~15-30ms).
@@ -126,6 +127,9 @@ def build_enriched_trades_view(conn, since_ms: int = 0):
             t.entry_time,
             t.exit_reason,
             t.pnl_pct,
+            t.total_costs_pct,
+            t.pnl_after_costs_pct,
+            t.pocket_id,
             t.regime_at_entry,
             ps.confidence_tier,
             ps.confidence_score,
@@ -165,7 +169,7 @@ def build_enriched_trades_view(conn, since_ms: int = 0):
 
 
 def analyze_single_bucket(conn, group_col: str, since_ms: int = 0) -> dict:
-    """Analyze performance by a single column/bucket."""
+    """Analyze performance by a single column/bucket, including net-after-costs."""
     cursor = conn.cursor()
 
     query = f"""
@@ -175,12 +179,16 @@ def analyze_single_bucket(conn, group_col: str, since_ms: int = 0) -> dict:
             SUM(CASE WHEN exit_reason = 'micro_profit' THEN 1 ELSE 0 END) as micro,
             SUM(CASE WHEN exit_reason = 'take_profit' THEN 1 ELSE 0 END) as tp,
             ROUND(AVG(pnl_pct), 5) as avg_pnl,
-            ROUND(SUM(pnl_pct), 5) as total_pnl
+            ROUND(SUM(pnl_pct), 5) as total_pnl,
+            ROUND(AVG(COALESCE(total_costs_pct, 0)), 5) as avg_costs,
+            ROUND(AVG(COALESCE(pnl_after_costs_pct, pnl_pct)), 5) as avg_net_pnl,
+            ROUND(SUM(COALESCE(pnl_after_costs_pct, pnl_pct)), 5) as total_net_pnl,
+            SUM(CASE WHEN COALESCE(pnl_after_costs_pct, pnl_pct) > 0 THEN 1 ELSE 0 END) as net_wins
         FROM enriched_trades
         WHERE entry_time > ?
         AND {group_col} IS NOT NULL
         GROUP BY {group_col}
-        ORDER BY n DESC
+        ORDER BY avg_net_pnl DESC
     """
 
     cursor.execute(query, (since_ms,))
@@ -195,14 +203,18 @@ def analyze_single_bucket(conn, group_col: str, since_ms: int = 0) -> dict:
                 "take_profit_rate": round((row[3] or 0) / n * 100, 1),
                 "winner_rate": round(((row[2] or 0) + (row[3] or 0)) / n * 100, 1),
                 "avg_pnl": row[4] or 0,
-                "total_pnl": row[5] or 0
+                "total_pnl": row[5] or 0,
+                "avg_costs": row[6] or 0,
+                "avg_net_pnl": row[7] or 0,
+                "total_net_pnl": row[8] or 0,
+                "net_win_rate": round((row[9] or 0) / n * 100, 1)
             }
 
     return results
 
 
 def analyze_combo_bucket(conn, col1: str, col2: str, since_ms: int = 0) -> dict:
-    """Analyze performance by combination of two columns."""
+    """Analyze performance by combination of two columns, including net-after-costs."""
     cursor = conn.cursor()
 
     query = f"""
@@ -212,14 +224,18 @@ def analyze_combo_bucket(conn, col1: str, col2: str, since_ms: int = 0) -> dict:
             SUM(CASE WHEN exit_reason = 'micro_profit' THEN 1 ELSE 0 END) as micro,
             SUM(CASE WHEN exit_reason = 'take_profit' THEN 1 ELSE 0 END) as tp,
             ROUND(AVG(pnl_pct), 5) as avg_pnl,
-            ROUND(SUM(pnl_pct), 5) as total_pnl
+            ROUND(SUM(pnl_pct), 5) as total_pnl,
+            ROUND(AVG(COALESCE(total_costs_pct, 0)), 5) as avg_costs,
+            ROUND(AVG(COALESCE(pnl_after_costs_pct, pnl_pct)), 5) as avg_net_pnl,
+            ROUND(SUM(COALESCE(pnl_after_costs_pct, pnl_pct)), 5) as total_net_pnl,
+            SUM(CASE WHEN COALESCE(pnl_after_costs_pct, pnl_pct) > 0 THEN 1 ELSE 0 END) as net_wins
         FROM enriched_trades
         WHERE entry_time > ?
         AND {col1} IS NOT NULL
         AND {col2} IS NOT NULL
         GROUP BY {col1}, {col2}
         HAVING COUNT(*) >= 5
-        ORDER BY avg_pnl DESC
+        ORDER BY avg_net_pnl DESC
     """
 
     cursor.execute(query, (since_ms,))
@@ -234,14 +250,18 @@ def analyze_combo_bucket(conn, col1: str, col2: str, since_ms: int = 0) -> dict:
                 "take_profit_rate": round((row[3] or 0) / n * 100, 1),
                 "winner_rate": round(((row[2] or 0) + (row[3] or 0)) / n * 100, 1),
                 "avg_pnl": row[4] or 0,
-                "total_pnl": row[5] or 0
+                "total_pnl": row[5] or 0,
+                "avg_costs": row[6] or 0,
+                "avg_net_pnl": row[7] or 0,
+                "total_net_pnl": row[8] or 0,
+                "net_win_rate": round((row[9] or 0) / n * 100, 1)
             }
 
     return results
 
 
 def find_best_buckets(all_analyses: dict, min_n: int = 10) -> list:
-    """Find top buckets by expected value with min sample size."""
+    """Find top buckets by NET-AFTER-COSTS expected value with min sample size."""
     all_buckets = []
 
     for category, buckets in all_analyses.items():
@@ -249,7 +269,8 @@ def find_best_buckets(all_analyses: dict, min_n: int = 10) -> list:
             if stats["n"] >= min_n:
                 all_buckets.append((category, bucket_name, stats))
 
-    all_buckets.sort(key=lambda x: x[2]["avg_pnl"], reverse=True)
+    # Sort by net PnL (after costs) - this is the TRUE profitability metric
+    all_buckets.sort(key=lambda x: x[2].get("avg_net_pnl", x[2]["avg_pnl"]), reverse=True)
     return all_buckets
 
 
@@ -263,15 +284,19 @@ def print_section(title: str, data: dict):
         print("  No data available")
         return
 
-    print(f"  {'Bucket':<30} {'N':>5} {'Win%':>6} {'Micro%':>7} {'TP%':>5} {'AvgPnL':>10}")
-    print(f"  {'-'*30} {'-'*5} {'-'*6} {'-'*7} {'-'*5} {'-'*10}")
+    # Updated to include NET-AFTER-COSTS
+    print(f"  {'Bucket':<25} {'N':>5} {'Win%':>6} {'RawPnL':>9} {'Costs':>7} {'NetPnL':>9} {'NetWin%':>8}")
+    print(f"  {'-'*25} {'-'*5} {'-'*6} {'-'*9} {'-'*7} {'-'*9} {'-'*8}")
 
-    sorted_data = sorted(data.items(), key=lambda x: x[1]["avg_pnl"], reverse=True)
+    # Sort by net PnL (after costs)
+    sorted_data = sorted(data.items(), key=lambda x: x[1].get("avg_net_pnl", x[1]["avg_pnl"]), reverse=True)
 
     for name, stats in sorted_data:
-        print(f"  {name:<30} {stats['n']:>5} {stats['winner_rate']:>5.1f}% "
-              f"{stats['micro_profit_rate']:>6.1f}% {stats['take_profit_rate']:>4.1f}% "
-              f"{stats['avg_pnl']:>9.4f}%")
+        avg_net = stats.get('avg_net_pnl', stats['avg_pnl'])
+        avg_costs = stats.get('avg_costs', 0)
+        net_win = stats.get('net_win_rate', stats['winner_rate'])
+        print(f"  {name:<25} {stats['n']:>5} {stats['winner_rate']:>5.1f}% "
+              f"{stats['avg_pnl']:>+8.4f}% {avg_costs:>6.4f}% {avg_net:>+8.4f}% {net_win:>7.1f}%")
 
 
 def main():
@@ -360,9 +385,9 @@ def main():
     # Merge all for ranking
     all_analyses = {**analyses, **combos}
 
-    # Best buckets
+    # Best buckets - by NET PnL (after costs)
     print(f"\n{'='*70}")
-    print(f" TOP 10 BEST BUCKETS (by Avg PnL, min n={args.min_n})")
+    print(f" TOP 10 BEST BUCKETS (by Net PnL after costs, min n={args.min_n})")
     print(f"{'='*70}")
 
     best = find_best_buckets(all_analyses, min_n=args.min_n)
@@ -370,14 +395,15 @@ def main():
     if not best:
         print("  No buckets with sufficient sample size")
     else:
-        print(f"  {'#':<3} {'Category':<15} {'Bucket':<35} {'N':>5} {'Win%':>6} {'AvgPnL':>10}")
-        print(f"  {'-'*3} {'-'*15} {'-'*35} {'-'*5} {'-'*6} {'-'*10}")
+        print(f"  {'#':<3} {'Category':<15} {'Bucket':<30} {'N':>5} {'RawPnL':>9} {'NetPnL':>9}")
+        print(f"  {'-'*3} {'-'*15} {'-'*30} {'-'*5} {'-'*9} {'-'*9}")
 
         for i, (category, bucket, stats) in enumerate(best[:10], 1):
-            print(f"  {i:<3} {category:<15} {bucket:<35} {stats['n']:>5} "
-                  f"{stats['winner_rate']:>5.1f}% {stats['avg_pnl']:>9.4f}%")
+            net_pnl = stats.get('avg_net_pnl', stats['avg_pnl'])
+            print(f"  {i:<3} {category:<15} {bucket:<30} {stats['n']:>5} "
+                  f"{stats['avg_pnl']:>+8.4f}% {net_pnl:>+8.4f}%")
 
-    # Worst buckets
+    # Worst buckets - by NET PnL (after costs)
     print(f"\n{'='*70}")
     print(f" TOP 10 WORST BUCKETS (to AVOID, min n={args.min_n})")
     print(f"{'='*70}")
@@ -387,46 +413,51 @@ def main():
     if not worst:
         print("  No buckets with sufficient sample size")
     else:
-        print(f"  {'#':<3} {'Category':<15} {'Bucket':<35} {'N':>5} {'Win%':>6} {'AvgPnL':>10}")
-        print(f"  {'-'*3} {'-'*15} {'-'*35} {'-'*5} {'-'*6} {'-'*10}")
+        print(f"  {'#':<3} {'Category':<15} {'Bucket':<30} {'N':>5} {'RawPnL':>9} {'NetPnL':>9}")
+        print(f"  {'-'*3} {'-'*15} {'-'*30} {'-'*5} {'-'*9} {'-'*9}")
 
         for i, (category, bucket, stats) in enumerate(worst[:10], 1):
-            print(f"  {i:<3} {category:<15} {bucket:<35} {stats['n']:>5} "
-                  f"{stats['winner_rate']:>5.1f}% {stats['avg_pnl']:>9.4f}%")
+            net_pnl = stats.get('avg_net_pnl', stats['avg_pnl'])
+            print(f"  {i:<3} {category:<15} {bucket:<30} {stats['n']:>5} "
+                  f"{stats['avg_pnl']:>+8.4f}% {net_pnl:>+8.4f}%")
 
-    # Recommendations
+    # Recommendations - using NET-AFTER-COSTS as the decision metric
     print(f"\n{'='*70}")
-    print(f" RECOMMENDED GATE SETTINGS")
+    print(f" RECOMMENDED GATE SETTINGS (by Net PnL after costs)")
     print(f"{'='*70}")
 
     if analyses.get("regime"):
         sorted_regimes = sorted(analyses["regime"].items(),
-                               key=lambda x: x[1]["avg_pnl"], reverse=True)
-        print(f"\n  REGIMES (sorted by avg_pnl):")
+                               key=lambda x: x[1].get("avg_net_pnl", x[1]["avg_pnl"]), reverse=True)
+        print(f"\n  REGIMES (sorted by net_pnl):")
         for regime, stats in sorted_regimes:
-            status = "ALLOW" if stats["avg_pnl"] > -0.04 else "CONSIDER BLOCKING"
-            print(f"    {regime:<20} avg={stats['avg_pnl']:>8.4f}% n={stats['n']:>3} -> {status}")
+            net_pnl = stats.get('avg_net_pnl', stats['avg_pnl'])
+            status = "ALLOW" if net_pnl > -0.04 else "CONSIDER BLOCKING"
+            print(f"    {regime:<20} net={net_pnl:>+8.4f}% n={stats['n']:>3} -> {status}")
 
     if analyses.get("confidence"):
         sorted_tiers = sorted(analyses["confidence"].items(),
-                             key=lambda x: x[1]["avg_pnl"], reverse=True)
-        print(f"\n  CONFIDENCE TIERS (sorted by avg_pnl):")
+                             key=lambda x: x[1].get("avg_net_pnl", x[1]["avg_pnl"]), reverse=True)
+        print(f"\n  CONFIDENCE TIERS (sorted by net_pnl):")
         for tier, stats in sorted_tiers:
-            print(f"    {tier:<20} avg={stats['avg_pnl']:>8.4f}% n={stats['n']:>3} micro_rate={stats['micro_profit_rate']:.1f}%")
+            net_pnl = stats.get('avg_net_pnl', stats['avg_pnl'])
+            print(f"    {tier:<20} net={net_pnl:>+8.4f}% n={stats['n']:>3} micro_rate={stats['micro_profit_rate']:.1f}%")
 
     if analyses.get("spread"):
         sorted_spreads = sorted(analyses["spread"].items(),
-                               key=lambda x: x[1]["avg_pnl"], reverse=True)
-        print(f"\n  SPREAD BUCKETS (sorted by avg_pnl):")
+                               key=lambda x: x[1].get("avg_net_pnl", x[1]["avg_pnl"]), reverse=True)
+        print(f"\n  SPREAD BUCKETS (sorted by net_pnl):")
         for spread, stats in sorted_spreads:
-            print(f"    {spread:<20} avg={stats['avg_pnl']:>8.4f}% n={stats['n']:>3}")
+            net_pnl = stats.get('avg_net_pnl', stats['avg_pnl'])
+            print(f"    {spread:<20} net={net_pnl:>+8.4f}% n={stats['n']:>3}")
 
     if analyses.get("imbalance"):
         sorted_imb = sorted(analyses["imbalance"].items(),
-                           key=lambda x: x[1]["avg_pnl"], reverse=True)
-        print(f"\n  IMBALANCE BUCKETS (sorted by avg_pnl):")
+                           key=lambda x: x[1].get("avg_net_pnl", x[1]["avg_pnl"]), reverse=True)
+        print(f"\n  IMBALANCE BUCKETS (sorted by net_pnl):")
         for imb, stats in sorted_imb:
-            print(f"    {imb:<20} avg={stats['avg_pnl']:>8.4f}% n={stats['n']:>3}")
+            net_pnl = stats.get('avg_net_pnl', stats['avg_pnl'])
+            print(f"    {imb:<20} net={net_pnl:>+8.4f}% n={stats['n']:>3}")
 
     # ============================================================
     # GATE COMPLIANCE CHECK

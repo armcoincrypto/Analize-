@@ -19,7 +19,7 @@ from typing import Dict, Optional, List
 from datetime import datetime, date
 from pathlib import Path
 
-from .config import SYSTEM_CONFIG
+from .config import SYSTEM_CONFIG, COST_MODEL
 from .signal_engine import Signal, ConditionResult
 from .execution_engine import TradeResult, ExitResult
 from .risk_controller import RiskDecision
@@ -90,9 +90,30 @@ class TradeLogger:
                 conditions_met INTEGER,
                 signal_confidence REAL,
                 status TEXT DEFAULT 'open',
+                -- Cost model fields (realistic trading costs)
+                entry_fee_pct REAL DEFAULT 0,
+                exit_fee_pct REAL DEFAULT 0,
+                spread_cost_pct REAL DEFAULT 0,
+                slippage_pct REAL DEFAULT 0,
+                total_costs_pct REAL DEFAULT 0,
+                pnl_after_costs_pct REAL DEFAULT 0,
+                -- Pocket tracking (which gate pocket allowed this trade)
+                pocket_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Add cost model columns to existing tables (migration)
+        try:
+            cursor.execute("ALTER TABLE trades ADD COLUMN entry_fee_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN exit_fee_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN spread_cost_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN slippage_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN total_costs_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN pnl_after_costs_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN pocket_id TEXT")
+        except:
+            pass  # Columns already exist
 
         # Signals table
         cursor.execute("""
@@ -647,12 +668,37 @@ class TradeLogger:
         except Exception as e:
             pass  # Silently ignore database lock errors
 
-    def log_trade_exit(self, result: ExitResult, mfe: float = 0, mae: float = 0):
-        """Log trade exit and update trade record."""
+    def log_trade_exit(self, result: ExitResult, mfe: float = 0, mae: float = 0,
+                        spread_at_exit: float = 0, imbalance_at_exit: float = 0.5,
+                        pocket_id: str = None):
+        """Log trade exit and update trade record with realistic cost model."""
         try:
             cursor = self.conn.cursor()
 
-            # Find the open trade
+            # Calculate realistic trading costs
+            if COST_MODEL.enabled:
+                entry_fee = COST_MODEL.entry_fee_pct
+                exit_fee = COST_MODEL.exit_fee_pct
+                spread_cost = COST_MODEL.spread_cost_pct
+
+                # Slippage: higher when imbalance is extreme (OB looks good but disappears)
+                imbalance_extremity = abs(imbalance_at_exit - 0.5) * 2  # 0 to 1
+                slippage = COST_MODEL.base_slippage_pct + (
+                    imbalance_extremity * COST_MODEL.imbalance_slippage_factor
+                )
+
+                # Total round-trip costs
+                total_costs = entry_fee + exit_fee + (2 * spread_cost) + slippage
+                pnl_after_costs = result.pnl_pct - total_costs
+            else:
+                entry_fee = 0
+                exit_fee = 0
+                spread_cost = 0
+                slippage = 0
+                total_costs = 0
+                pnl_after_costs = result.pnl_pct
+
+            # Update trade with exit info and costs
             cursor.execute("""
                 UPDATE trades SET
                     exit_price = ?,
@@ -663,6 +709,13 @@ class TradeLogger:
                     exit_reason = ?,
                     mfe = ?,
                     mae = ?,
+                    entry_fee_pct = ?,
+                    exit_fee_pct = ?,
+                    spread_cost_pct = ?,
+                    slippage_pct = ?,
+                    total_costs_pct = ?,
+                    pnl_after_costs_pct = ?,
+                    pocket_id = ?,
                     status = 'closed'
                 WHERE symbol = ? AND status = 'open'
             """, (
@@ -674,11 +727,24 @@ class TradeLogger:
                 result.reason.value,
                 mfe,
                 mae,
+                entry_fee,
+                exit_fee,
+                spread_cost,
+                slippage,
+                total_costs,
+                pnl_after_costs,
+                pocket_id,
                 result.symbol
             ))
 
             self.conn.commit()
-            logger.debug(f"Trade exit logged: {result.symbol}")
+
+            # Log with cost info
+            if COST_MODEL.enabled:
+                logger.debug(f"Trade exit logged: {result.symbol} | PnL: {result.pnl_pct:.4f}% | "
+                           f"Costs: {total_costs:.4f}% | Net: {pnl_after_costs:.4f}%")
+            else:
+                logger.debug(f"Trade exit logged: {result.symbol}")
 
             # Update daily stats
             self._update_daily_stats()
