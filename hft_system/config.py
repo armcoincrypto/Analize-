@@ -240,7 +240,7 @@ class WinnerGateConfig:
     # Only trade in chop if conditions are exceptionally strong
     pocket_b_enabled: bool = True  # Enable secondary pocket
     pocket_b_regimes: List[str] = field(default_factory=lambda: ["low_vol_chop"])
-    pocket_b_tiers: List[str] = field(default_factory=lambda: ["high"])  # HIGH only
+    pocket_b_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])  # Allow medium for research
     pocket_b_min_imbalance: float = 0.80  # Much stricter
     pocket_b_max_spread_pct: float = 0.02  # Tight spread required
     pocket_b_min_depth: float = 10000.0  # Minimum OB depth (USD)
