@@ -487,9 +487,10 @@ def main():
     print(f"  Trades executed (passed gate):   {trades_passed}")
 
     # Check for forbidden buckets in executed trades
-    print(f"\n  GATE RULE VIOLATIONS (should be 0):")
+    # NOTE: Research mode allows MEDIUM tier and low_vol_chop (Pocket B)
+    print(f"\n  GATE RULE VIOLATIONS (research mode thresholds):")
 
-    # Check mean_reversion trades
+    # Check mean_reversion trades (ALWAYS blocked)
     cursor.execute("""
         SELECT COUNT(*) FROM enriched_trades
         WHERE entry_time > ?
@@ -499,41 +500,50 @@ def main():
     status = "✓ PASS" if mean_rev_trades == 0 else "✗ VIOLATION"
     print(f"    mean_reversion trades: {mean_rev_trades} {status}")
 
-    # Check MEDIUM tier trades
+    # Check LOW tier trades (MEDIUM is allowed in research)
     cursor.execute("""
         SELECT COUNT(*) FROM enriched_trades
         WHERE entry_time > ?
-        AND confidence_tier = 'medium'
+        AND confidence_tier = 'low'
     """, (args.since,))
-    medium_trades = cursor.fetchone()[0]
-    status = "✓ PASS" if medium_trades == 0 else "✗ VIOLATION"
-    print(f"    MEDIUM tier trades:    {medium_trades} {status}")
+    low_tier_trades = cursor.fetchone()[0]
+    status = "✓ PASS" if low_tier_trades == 0 else "✗ VIOLATION"
+    print(f"    LOW tier trades:       {low_tier_trades} {status}")
 
-    # Check imbalance < 0.75 trades
+    # Check imbalance < 0.70 trades (Pocket A min is 0.70)
     cursor.execute("""
         SELECT COUNT(*) FROM enriched_trades
         WHERE entry_time > ?
-        AND COALESCE(ps_imbalance, 0) < 0.75
+        AND COALESCE(ps_imbalance, 0) < 0.70
         AND COALESCE(ps_imbalance, 0) > 0
     """, (args.since,))
     low_imb_trades = cursor.fetchone()[0]
     status = "✓ PASS" if low_imb_trades == 0 else "✗ VIOLATION"
-    print(f"    imbalance < 0.75:      {low_imb_trades} {status}")
+    print(f"    imbalance < 0.70:      {low_imb_trades} {status}")
 
-    # Check low_vol_chop trades (blocked in strict mode)
+    # Check news_spike trades (ALWAYS blocked)
+    cursor.execute("""
+        SELECT COUNT(*) FROM enriched_trades
+        WHERE entry_time > ?
+        AND (ps_regime = 'news_spike' OR regime_at_entry = 'news_spike')
+    """, (args.since,))
+    news_spike_trades = cursor.fetchone()[0]
+    status = "✓ PASS" if news_spike_trades == 0 else "✗ VIOLATION"
+    print(f"    news_spike trades:     {news_spike_trades} {status}")
+
+    # Info: low_vol_chop is ALLOWED in research mode (Pocket B)
     cursor.execute("""
         SELECT COUNT(*) FROM enriched_trades
         WHERE entry_time > ?
         AND (ps_regime = 'low_vol_chop' OR regime_at_entry = 'low_vol_chop')
     """, (args.since,))
     chop_trades = cursor.fetchone()[0]
-    status = "✓ PASS" if chop_trades == 0 else "✗ VIOLATION (strict mode)"
-    print(f"    low_vol_chop trades:   {chop_trades} {status}")
+    print(f"    low_vol_chop trades:   {chop_trades} (allowed in Pocket B)")
 
-    # Summary
-    total_violations = mean_rev_trades + medium_trades + low_imb_trades + chop_trades
+    # Summary - only count actual violations
+    total_violations = mean_rev_trades + low_tier_trades + low_imb_trades + news_spike_trades
     if total_violations == 0:
-        print(f"\n  ✓ GATE FULLY COMPLIANT - All trades in approved pocket")
+        print(f"\n  ✓ GATE FULLY COMPLIANT - All trades in approved pockets")
     else:
         print(f"\n  ✗ {total_violations} VIOLATIONS - Check gate implementation")
 

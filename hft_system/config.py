@@ -237,14 +237,14 @@ class WinnerGateConfig:
     pocket_a_max_spread_pct: float = 0.05
 
     # === POCKET B: SECONDARY (low_vol_chop with extra confirmation) ===
-    # Only trade in chop if conditions are exceptionally strong
+    # Research-friendly but still strict - enough to collect data
     pocket_b_enabled: bool = True  # Enable secondary pocket
     pocket_b_regimes: List[str] = field(default_factory=lambda: ["low_vol_chop"])
     pocket_b_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])  # Allow medium for research
-    pocket_b_min_imbalance: float = 0.80  # Much stricter
-    pocket_b_max_spread_pct: float = 0.02  # Tight spread required
+    pocket_b_min_imbalance: float = 0.78  # Slightly relaxed for research (was 0.80)
+    pocket_b_max_spread_pct: float = 0.03  # Slightly relaxed for research (was 0.02)
     pocket_b_min_depth: float = 10000.0  # Minimum OB depth (USD)
-    pocket_b_flow_confirm_sec: float = 2.0  # Flow must confirm for 2 seconds
+    pocket_b_flow_confirm_sec: float = 1.0  # Faster confirm for research (was 2.0)
 
     # === BLOCKED REGIMES (never trade) ===
     blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "liquidity_vacuum", "news_spike", "unknown"])
@@ -259,7 +259,7 @@ class WinnerGateConfig:
 
     # === PROBE PROTECTIONS (prevent overtrading) ===
     max_trades_per_symbol_per_hour: int = 2
-    min_seconds_between_trades_per_symbol: int = 300  # 5 minutes
+    min_seconds_between_trades_per_symbol: int = 120  # 2 minutes (research mode)
 
 
 WINNER_GATE = WinnerGateConfig()
