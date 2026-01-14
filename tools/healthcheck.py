@@ -227,7 +227,11 @@ def check_cost_model_impact(conn):
                 SUM(CASE WHEN pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) as net_wins,
                 ROUND(SUM(pnl_pct), 4) as total_raw_pnl,
                 ROUND(SUM(total_costs_pct), 4) as total_costs,
-                ROUND(SUM(pnl_after_costs_pct), 4) as total_net_pnl
+                ROUND(SUM(pnl_after_costs_pct), 4) as total_net_pnl,
+                ROUND(AVG(entry_fee_pct), 4) as avg_entry_fee,
+                ROUND(AVG(exit_fee_pct), 4) as avg_exit_fee,
+                ROUND(AVG(spread_cost_pct), 4) as avg_spread,
+                ROUND(AVG(slippage_pct), 4) as avg_slippage
             FROM trades
             WHERE status = 'closed'
         """)
@@ -246,9 +250,12 @@ def check_cost_model_impact(conn):
         print(f"    Win rate:       {raw_win_pct:.1f}%")
         print(f"    Total PnL:      {row['total_raw_pnl']:+.4f}%")
         print()
-        print(f"  Costs:")
-        print(f"    Total costs:    {row['total_costs']:.4f}%")
-        print(f"    Avg per trade:  {row['total_costs']/row['total']:.4f}%")
+        print(f"  Cost Breakdown (avg per trade):")
+        print(f"    Entry fee:      {row['avg_entry_fee']:.4f}%")
+        print(f"    Exit fee:       {row['avg_exit_fee']:.4f}%")
+        print(f"    Spread cost:    {row['avg_spread']:.4f}%")
+        print(f"    Slippage:       {row['avg_slippage']:.4f}%")
+        print(f"    TOTAL:          {row['total_costs']/row['total']:.4f}%")
         print()
         print(f"  After costs:")
         print(f"    Win rate:       {net_win_pct:.1f}%")
@@ -259,6 +266,49 @@ def check_cost_model_impact(conn):
             print("  ⚠️  NEGATIVE NET PnL - Strategy not profitable after costs!")
         elif row['total_net_pnl'] > 0:
             print("  ✓  POSITIVE NET PnL - Strategy profitable after costs!")
+
+    except Exception as e:
+        print(f"  Error: {e}")
+
+
+def check_performance_by_execution_mode(conn):
+    """Show performance by execution mode (taker vs maker)."""
+    print_header("PERFORMANCE BY EXECUTION MODE")
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+                COALESCE(execution_mode, 'taker') as mode,
+                COUNT(*) as n,
+                SUM(CASE WHEN pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(AVG(pnl_pct), 4) as avg_raw_pnl,
+                ROUND(AVG(total_costs_pct), 4) as avg_costs,
+                ROUND(AVG(pnl_after_costs_pct), 4) as avg_net_pnl,
+                ROUND(SUM(pnl_after_costs_pct), 4) as total_net_pnl
+            FROM trades
+            WHERE status = 'closed'
+            GROUP BY execution_mode
+            ORDER BY avg_net_pnl DESC
+        """)
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("  No closed trades.")
+            return
+
+        print(f"  {'Mode':<10} {'N':>6} {'Win%':>8} {'Raw PnL':>10} {'Costs':>10} {'Net PnL':>10} {'Total':>10}")
+        print("-" * 70)
+
+        for row in rows:
+            win_pct = (row['wins'] / row['n']) * 100 if row['n'] > 0 else 0
+            avg_raw = row['avg_raw_pnl'] or 0
+            avg_costs = row['avg_costs'] or 0
+            avg_net = row['avg_net_pnl'] or 0
+            total_net = row['total_net_pnl'] or 0
+
+            print(f"  {row['mode']:<10} {row['n']:>6} {win_pct:>7.1f}% "
+                  f"{avg_raw:>+9.4f}% {avg_costs:>9.4f}% {avg_net:>+9.4f}% {total_net:>+9.4f}%")
 
     except Exception as e:
         print(f"  Error: {e}")
@@ -293,6 +343,7 @@ def main():
         check_gate_blocks(conn)
         check_performance_summary(conn)
         check_cost_model_impact(conn)
+        check_performance_by_execution_mode(conn)
         check_trades(conn)
 
         print_header("END OF HEALTHCHECK")

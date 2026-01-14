@@ -99,6 +99,8 @@ class TradeLogger:
                 pnl_after_costs_pct REAL DEFAULT 0,
                 -- Pocket tracking (which gate pocket allowed this trade)
                 pocket_id TEXT,
+                -- Execution mode tracking (taker vs maker)
+                execution_mode TEXT DEFAULT 'taker',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -112,6 +114,7 @@ class TradeLogger:
             cursor.execute("ALTER TABLE trades ADD COLUMN total_costs_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN pnl_after_costs_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN pocket_id TEXT")
+            cursor.execute("ALTER TABLE trades ADD COLUMN execution_mode TEXT DEFAULT 'taker'")
         except:
             pass  # Columns already exist
 
@@ -698,6 +701,9 @@ class TradeLogger:
                 total_costs = 0
                 pnl_after_costs = result.pnl_pct
 
+            # Get execution mode for logging
+            execution_mode = COST_MODEL.execution_mode if COST_MODEL.enabled else "taker"
+
             # Update trade with exit info and costs
             cursor.execute("""
                 UPDATE trades SET
@@ -716,6 +722,7 @@ class TradeLogger:
                     total_costs_pct = ?,
                     pnl_after_costs_pct = ?,
                     pocket_id = ?,
+                    execution_mode = ?,
                     status = 'closed'
                 WHERE symbol = ? AND status = 'open'
             """, (
@@ -734,6 +741,7 @@ class TradeLogger:
                 total_costs,
                 pnl_after_costs,
                 pocket_id,
+                execution_mode,
                 result.symbol
             ))
 

@@ -119,23 +119,53 @@ class CostModelConfig:
     # Enable cost model (subtract from PnL)
     enabled: bool = True
 
-    # Taker fees (Binance spot standard)
-    # Adjust based on your account tier (VIP levels)
-    entry_fee_pct: float = 0.10  # 0.10% taker fee
-    exit_fee_pct: float = 0.10   # 0.10% taker fee
+    # === EXECUTION MODE ===
+    # "taker" = market orders (instant fill, high fees)
+    # "maker" = limit orders (may not fill, low fees)
+    execution_mode: str = "taker"  # "taker" or "maker"
 
-    # Spread cost (half-spread paid on entry and exit)
-    # Estimated based on typical SUI/XRP spreads
-    spread_cost_pct: float = 0.02  # ~0.02% typical spread
+    # === TAKER COSTS (market orders) ===
+    taker_entry_fee_pct: float = 0.10  # 0.10% taker fee
+    taker_exit_fee_pct: float = 0.10   # 0.10% taker fee
+    taker_spread_cost_pct: float = 0.02  # ~0.02% crossing spread
+    taker_slippage_pct: float = 0.02  # Market impact
 
-    # Slippage model
-    # When OB "looks good" but disappears on execution
-    base_slippage_pct: float = 0.01  # Base slippage
-    imbalance_slippage_factor: float = 0.02  # Extra slippage when imbalance is extreme
+    # === MAKER COSTS (limit orders) ===
+    maker_entry_fee_pct: float = 0.01  # 0.01% maker fee (or rebate)
+    maker_exit_fee_pct: float = 0.01   # 0.01% maker fee
+    maker_spread_cost_pct: float = 0.005  # Minimal - you set the price
+    maker_slippage_pct: float = 0.0  # No slippage - you set the price
 
-    # Total estimated cost per round-trip:
-    # 2 * 0.10% (fees) + 2 * 0.02% (spread) + 0.01% (slippage) = 0.25%
-    # This means edge must be > 0.25% to profit!
+    # === MAKER SIMULATION ===
+    maker_fill_probability: float = 0.70  # 70% chance of fill
+    maker_wait_seconds: float = 1.0  # Wait time for limit order
+
+    # Computed totals (for reference):
+    # TAKER: 2*0.10 + 2*0.02 + 0.02 = 0.26% per round-trip
+    # MAKER: 2*0.01 + 2*0.005 + 0.0 = 0.03% per round-trip
+
+    @property
+    def entry_fee_pct(self) -> float:
+        """Get entry fee based on execution mode."""
+        return self.maker_entry_fee_pct if self.execution_mode == "maker" else self.taker_entry_fee_pct
+
+    @property
+    def exit_fee_pct(self) -> float:
+        """Get exit fee based on execution mode."""
+        return self.maker_exit_fee_pct if self.execution_mode == "maker" else self.taker_exit_fee_pct
+
+    @property
+    def spread_cost_pct(self) -> float:
+        """Get spread cost based on execution mode."""
+        return self.maker_spread_cost_pct if self.execution_mode == "maker" else self.taker_spread_cost_pct
+
+    @property
+    def base_slippage_pct(self) -> float:
+        """Get base slippage based on execution mode."""
+        return self.maker_slippage_pct if self.execution_mode == "maker" else self.taker_slippage_pct
+
+    # Legacy compatibility
+    imbalance_slippage_factor: float = 0.02  # Extra slippage when imbalance is extreme (taker only)
 
 
 COST_MODEL = CostModelConfig()
