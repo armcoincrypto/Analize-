@@ -241,7 +241,7 @@ class WinnerGateConfig:
     pocket_b_enabled: bool = True  # Enable secondary pocket
     pocket_b_regimes: List[str] = field(default_factory=lambda: ["low_vol_chop"])
     pocket_b_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])  # Allow medium for research
-    pocket_b_min_imbalance: float = 0.78  # Slightly relaxed for research (was 0.80)
+    pocket_b_min_imbalance: float = 0.70  # Match Pocket A for research
     pocket_b_max_spread_pct: float = 0.03  # Slightly relaxed for research (was 0.02)
     pocket_b_min_depth: float = 10000.0  # Minimum OB depth (USD)
     pocket_b_flow_confirm_sec: float = 1.0  # Faster confirm for research (was 2.0)
