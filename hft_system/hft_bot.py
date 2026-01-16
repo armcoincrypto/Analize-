@@ -542,7 +542,7 @@ class HFTBot:
                 primary_cause = self._determine_causality(signal, orderbook_data, trade_flow)
 
                 # Determine allowed causes based on signal type (long vs short)
-                is_long = signal.signal_type.value == "long"
+                is_long = signal.signal_type.value.lower() == "long"
                 allowed_causes = WINNER_GATE.allowed_causes_long if is_long else WINNER_GATE.allowed_causes_short
 
                 # Check if cause is allowed
