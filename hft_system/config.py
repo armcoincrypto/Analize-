@@ -279,6 +279,21 @@ class WinnerGateConfig:
     # === BLOCKED REGIMES (never trade) ===
     blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "liquidity_vacuum", "news_spike", "unknown"])
 
+    # === CAUSALITY FILTER (only trade when WHY is clear) ===
+    # Only trade when primary_cause is strong, block "unknown" causes
+    causality_filter_enabled: bool = True
+    allowed_causes_long: List[str] = field(default_factory=lambda: [
+        "cvd_buy_pressure",      # CVD shows buy pressure - strong signal
+        "ob_bullish_imbalance",  # Orderbook is bullish
+        "price_momentum_up"      # Price moving up
+    ])
+    allowed_causes_short: List[str] = field(default_factory=lambda: [
+        "cvd_sell_pressure",     # CVD shows sell pressure - strong signal
+        "ob_bearish_imbalance",  # Orderbook is bearish
+        "price_momentum_down"    # Price moving down
+    ])
+    block_unknown_cause: bool = True  # Block trades with no clear cause
+
     # === LEGACY SETTINGS (for backward compatibility) ===
     strict_mode: bool = True  # If True, only Pocket A in live mode
     min_confidence_tier: str = "high"
@@ -287,9 +302,9 @@ class WinnerGateConfig:
     research_allowed_tiers: List[str] = field(default_factory=lambda: ["high", "medium"])
     research_min_imbalance: float = 0.70
 
-    # === PROBE PROTECTIONS (prevent overtrading) ===
-    max_trades_per_symbol_per_hour: int = 2
-    min_seconds_between_trades_per_symbol: int = 120  # 2 minutes (research mode)
+    # === PROBE PROTECTIONS (research mode - higher limits) ===
+    max_trades_per_symbol_per_hour: int = 6  # Increased for research (was 2)
+    min_seconds_between_trades_per_symbol: int = 120  # 2 minutes
 
 
 WINNER_GATE = WinnerGateConfig()

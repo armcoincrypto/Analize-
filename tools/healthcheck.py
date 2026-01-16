@@ -271,6 +271,145 @@ def check_cost_model_impact(conn):
         print(f"  Error: {e}")
 
 
+def check_mfe_mae_analysis(conn):
+    """Show MFE/MAE analysis by pocket - reveals edge quality."""
+    print_header("MFE/MAE ANALYSIS (Edge Quality)")
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+                COALESCE(pocket_id, '?') as pocket,
+                COUNT(*) as n,
+                ROUND(AVG(mfe), 4) as avg_mfe,
+                ROUND(MAX(mfe), 4) as max_mfe,
+                ROUND(AVG(mae), 4) as avg_mae,
+                ROUND(MIN(mae), 4) as worst_mae,
+                ROUND(AVG(mfe) - ABS(AVG(mae)), 4) as edge_ratio,
+                ROUND(AVG(CASE WHEN pnl_after_costs_pct > 0 THEN mfe ELSE NULL END), 4) as winner_mfe,
+                ROUND(AVG(CASE WHEN pnl_after_costs_pct <= 0 THEN mfe ELSE NULL END), 4) as loser_mfe
+            FROM trades
+            WHERE status = 'closed' AND (mfe != 0 OR mae != 0)
+            GROUP BY pocket_id
+            ORDER BY edge_ratio DESC
+        """)
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("  No MFE/MAE data available yet.")
+            print("  (Fix was deployed - waiting for new trades)")
+            return
+
+        print(f"  {'Pocket':<8} {'N':>5} {'Avg MFE':>10} {'Max MFE':>10} {'Avg MAE':>10} {'Edge':>10} {'W-MFE':>10} {'L-MFE':>10}")
+        print("-" * 85)
+
+        for row in rows:
+            edge_ratio = row['edge_ratio'] or 0
+            edge_symbol = "+" if edge_ratio > 0 else ""
+
+            winner_mfe = row['winner_mfe'] or 0
+            loser_mfe = row['loser_mfe'] or 0
+
+            print(f"  {row['pocket']:<8} {row['n']:>5} "
+                  f"{row['avg_mfe']:>+9.4f}% {row['max_mfe']:>+9.4f}% "
+                  f"{row['avg_mae']:>9.4f}% {edge_symbol}{edge_ratio:>8.4f}% "
+                  f"{winner_mfe:>+9.4f}% {loser_mfe:>+9.4f}%")
+
+        print()
+        print("  MFE = Max Favorable Excursion (best profit during trade)")
+        print("  MAE = Max Adverse Excursion (worst drawdown during trade)")
+        print("  Edge = MFE - |MAE| (positive = good entry timing)")
+        print("  W-MFE = Avg MFE for winners, L-MFE = Avg MFE for losers")
+
+    except Exception as e:
+        print(f"  Error: {e}")
+
+
+def check_causality_performance(conn):
+    """Show performance by primary cause - which WHY is profitable?"""
+    print_header("CAUSALITY PERFORMANCE (Winners vs Losers by WHY)")
+
+    cursor = conn.cursor()
+    try:
+        # Join trades with trade_causality to get cause performance
+        cursor.execute("""
+            SELECT
+                COALESCE(c.primary_cause, 'unknown') as cause,
+                COUNT(*) as n,
+                SUM(CASE WHEN t.pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN t.pnl_after_costs_pct <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(AVG(t.pnl_after_costs_pct), 4) as avg_net_pnl,
+                ROUND(SUM(t.pnl_after_costs_pct), 4) as total_net_pnl
+            FROM trades t
+            LEFT JOIN trade_causality c ON t.id = c.trade_id
+            WHERE t.status = 'closed'
+            GROUP BY c.primary_cause
+            ORDER BY total_net_pnl DESC
+        """)
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("  No causality data available.")
+            return
+
+        print(f"  {'Cause':<25} {'N':>5} {'Wins':>5} {'Loss':>5} {'Win%':>7} {'Avg PnL':>10} {'Total PnL':>12}")
+        print("-" * 80)
+
+        for row in rows:
+            win_pct = (row['wins'] / row['n']) * 100 if row['n'] > 0 else 0
+            avg_pnl = row['avg_net_pnl'] or 0
+            total_pnl = row['total_net_pnl'] or 0
+
+            # Highlight profitable causes
+            pnl_marker = "✓" if total_pnl > 0 else "✗" if total_pnl < -0.1 else " "
+
+            print(f"{pnl_marker} {row['cause']:<24} {row['n']:>5} {row['wins']:>5} {row['losses']:>5} "
+                  f"{win_pct:>6.1f}% {avg_pnl:>+9.4f}% {total_pnl:>+11.4f}%")
+
+        print()
+        print("  ✓ = Profitable cause, ✗ = Losing cause")
+        print("  Focus on causes with positive Total PnL!")
+
+    except Exception as e:
+        print(f"  Error: {e}")
+
+
+def check_blocked_causes(conn):
+    """Show causality filter blocks in last 24h."""
+    print_header("CAUSALITY FILTER BLOCKS (Last 24h)")
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+                REPLACE(block_reason, 'cause_filtered:', '') as cause,
+                COUNT(*) as cnt
+            FROM blocked_signals
+            WHERE block_reason LIKE 'cause_filtered:%'
+              AND timestamp > strftime('%s','now','-24 hours')*1000
+            GROUP BY block_reason
+            ORDER BY cnt DESC
+            LIMIT 10
+        """)
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("  No causality filter blocks in last 24h.")
+            return
+
+        total = sum(row['cnt'] for row in rows)
+        print(f"  Total blocked by causality filter: {total}")
+        print()
+        print(f"  {'Cause Blocked':<30} {'Count':>8}")
+        print("-" * 45)
+
+        for row in rows:
+            print(f"  {row['cause']:<30} {row['cnt']:>8}")
+
+    except Exception as e:
+        print(f"  Error: {e}")
+
+
 def check_performance_by_execution_mode(conn):
     """Show performance by execution mode (taker vs maker)."""
     print_header("PERFORMANCE BY EXECUTION MODE")
@@ -342,6 +481,9 @@ def main():
         check_regime_distribution(conn)
         check_gate_blocks(conn)
         check_performance_summary(conn)
+        check_mfe_mae_analysis(conn)
+        check_causality_performance(conn)
+        check_blocked_causes(conn)
         check_cost_model_impact(conn)
         check_performance_by_execution_mode(conn)
         check_trades(conn)

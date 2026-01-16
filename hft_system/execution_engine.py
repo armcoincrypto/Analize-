@@ -84,6 +84,8 @@ class ExitResult:
     reason: ExitReason
     timestamp: int
     entry_time: int = 0  # For linking to trade_id
+    mfe: float = 0.0  # Max favorable excursion (%)
+    mae: float = 0.0  # Max adverse excursion (%)
 
 
 class ExecutionEngine:
@@ -609,7 +611,9 @@ class ExecutionEngine:
             hold_time_sec=hold_time,
             reason=reason,
             timestamp=int(time.time() * 1000),
-            entry_time=position.entry_time
+            entry_time=position.entry_time,
+            mfe=mfe,  # Pass MFE to result (before it was popped)
+            mae=mae   # Pass MAE to result (before it was popped)
         )
 
         emoji = "WIN" if pnl > 0 else "LOSS"

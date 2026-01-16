@@ -277,6 +277,45 @@ class HFTBot:
         # Not enough confirmations yet - return stable regime
         return stable_regime
 
+    def _determine_causality(self, signal, orderbook_data: dict, trade_flow: dict) -> str:
+        """
+        Determine the primary cause of a signal BEFORE entering trade.
+        Used by causality filter to block trades with unknown/weak causes.
+
+        Returns: primary_cause string
+        """
+        causes = []
+
+        # Check orderbook imbalance
+        ob_imbalance = orderbook_data.get("imbalance", 0.5)
+        if ob_imbalance > 0.65:
+            causes.append(("ob_bullish_imbalance", ob_imbalance - 0.5))
+        elif ob_imbalance < 0.35:
+            causes.append(("ob_bearish_imbalance", 0.5 - ob_imbalance))
+
+        # Check CVD momentum
+        cvd_1s = trade_flow.get("delta_1s", 0)
+        if abs(cvd_1s) > 1000:  # Significant volume delta
+            if cvd_1s > 0:
+                causes.append(("cvd_buy_pressure", cvd_1s / 10000))
+            else:
+                causes.append(("cvd_sell_pressure", abs(cvd_1s) / 10000))
+
+        # Check price velocity
+        price_velocity = self.ws_manager.get_price_velocity(signal.symbol)
+        velocity_1s = price_velocity.get("velocity_1s", 0)
+        if abs(velocity_1s) > 0.01:  # >0.01% in 1s is significant
+            if velocity_1s > 0:
+                causes.append(("price_momentum_up", velocity_1s))
+            else:
+                causes.append(("price_momentum_down", abs(velocity_1s)))
+
+        # Sort by strength and get primary cause
+        causes.sort(key=lambda x: x[1], reverse=True)
+        primary_cause = causes[0][0] if causes else "unknown"
+
+        return primary_cause
+
     async def _on_signal(self, signal):
         """Handle new signal from signal engine."""
         self.signals_generated += 1
@@ -493,6 +532,42 @@ class HFTBot:
             self.active_pocket[symbol] = pocket_id
             logger.info(f"WINNER_GATE PASS [Pocket {pocket_id}]: {signal.symbol} | regime={current_regime}, tier={tier_str}, imb={current_imbalance:.3f}")
 
+            # ============================================================
+            # CAUSALITY FILTER - Only trade when WHY is clear
+            # ============================================================
+            # Expert feedback: "Causality tracking shows only cvd_buy_pressure
+            # trades are profitable. Block unknown cause trades."
+            # ============================================================
+            if WINNER_GATE.causality_filter_enabled:
+                primary_cause = self._determine_causality(signal, orderbook_data, trade_flow)
+
+                # Determine allowed causes based on signal type (long vs short)
+                is_long = signal.signal_type.value == "long"
+                allowed_causes = WINNER_GATE.allowed_causes_long if is_long else WINNER_GATE.allowed_causes_short
+
+                # Check if cause is allowed
+                cause_allowed = primary_cause in allowed_causes
+                cause_blocked = (WINNER_GATE.block_unknown_cause and primary_cause == "unknown")
+
+                if not cause_allowed or cause_blocked:
+                    gate_reason = f"causality_filter: cause={primary_cause} not in {allowed_causes}" if not cause_allowed else f"causality_filter: unknown_cause_blocked"
+                    logger.info(f"CAUSALITY FILTER BLOCK: {signal.symbol} - {gate_reason}")
+
+                    # Log to blocked_signals
+                    self.trade_logger.log_blocked_signal(
+                        symbol=signal.symbol,
+                        signal_type=signal.signal_type.value,
+                        entry_price=signal.entry_price,
+                        block_reason=f"cause_filtered:{primary_cause}",
+                        block_details=gate_reason,
+                        market_conditions=orderbook_data,
+                        regime=current_regime
+                    )
+                    self.signals_blocked += 1
+                    return
+                else:
+                    logger.info(f"CAUSALITY FILTER PASS: {signal.symbol} | cause={primary_cause}")
+
         # ============================================================
         # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)
         # ============================================================
@@ -669,8 +744,9 @@ class HFTBot:
 
     def _on_exit(self, result):
         """Handle position exit."""
-        mfe = self.execution_engine.position_mfe.get(result.symbol, 0)
-        mae = self.execution_engine.position_mae.get(result.symbol, 0)
+        # MFE/MAE now come from the result (fixed bug: was getting 0 because dict was already popped)
+        mfe = result.mfe
+        mae = result.mae
 
         # Get market conditions at exit for cost model
         orderbook = self.ws_manager.get_orderbook(result.symbol)
