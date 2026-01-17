@@ -282,10 +282,11 @@ class WinnerGateConfig:
     # === CAUSALITY FILTER (only trade when WHY is clear) ===
     # Only trade when primary_cause is strong, block "unknown" causes
     causality_filter_enabled: bool = True
+    # AUDIT 2026-01-17: ob_bullish_imbalance removed - 0% win rate with 13 trades
     allowed_causes_long: List[str] = field(default_factory=lambda: [
-        "cvd_buy_pressure",      # CVD shows buy pressure - strong signal
-        "ob_bullish_imbalance",  # Orderbook is bullish
+        "cvd_buy_pressure",      # CVD shows buy pressure - 16.7% win rate (best)
         "price_momentum_up"      # Price moving up
+        # "ob_bullish_imbalance" REMOVED: 0% win rate, -1.86% total PnL
     ])
     allowed_causes_short: List[str] = field(default_factory=lambda: [
         "cvd_sell_pressure",     # CVD shows sell pressure - strong signal
