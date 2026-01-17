@@ -178,6 +178,7 @@ def audit_sql_queries(conn):
     """Run all required audit SQL queries."""
 
     # Query 1: Performance by CAUSE
+    # NOTE: trades.trade_id is TEXT, trade_causality.trade_id is TEXT - must join on TEXT=TEXT
     run_sql_query(conn, "1) PERFORMANCE BY CAUSE (After Costs)", """
         SELECT
             COALESCE(tc.primary_cause, 'unknown') as cause,
@@ -187,7 +188,7 @@ def audit_sql_queries(conn):
             ROUND(SUM(t.pnl_after_costs_pct), 4) as total_net,
             ROUND(100.0 * SUM(CASE WHEN t.pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) as win_pct
         FROM trades t
-        LEFT JOIN trade_causality tc ON tc.trade_id = t.id
+        LEFT JOIN trade_causality tc ON tc.trade_id = t.trade_id
         WHERE t.status = 'closed'
         GROUP BY COALESCE(tc.primary_cause, 'unknown')
         ORDER BY total_net DESC
@@ -207,18 +208,19 @@ def audit_sql_queries(conn):
         GROUP BY CASE WHEN pnl_after_costs_pct > 0 THEN 'WIN' ELSE 'LOSS' END
     """)
 
-    # Query 3: Performance by REGIME
+    # Query 3: Performance by REGIME (regime is in position_sizing table)
     run_sql_query(conn, "3) PERFORMANCE BY REGIME", """
         SELECT
-            COALESCE(regime, 'unknown') as regime,
+            COALESCE(ps.regime, 'unknown') as regime,
             COUNT(*) as n,
-            ROUND(AVG(pnl_after_costs_pct), 4) as avg_net,
-            ROUND(SUM(pnl_after_costs_pct), 4) as total_net,
-            ROUND(AVG(total_costs_pct), 4) as avg_cost,
-            ROUND(100.0 * SUM(CASE WHEN pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) as win_pct
-        FROM trades
-        WHERE status = 'closed'
-        GROUP BY regime
+            ROUND(AVG(t.pnl_after_costs_pct), 4) as avg_net,
+            ROUND(SUM(t.pnl_after_costs_pct), 4) as total_net,
+            ROUND(AVG(t.total_costs_pct), 4) as avg_cost,
+            ROUND(100.0 * SUM(CASE WHEN t.pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) as win_pct
+        FROM trades t
+        LEFT JOIN position_sizing ps ON t.trade_id = ps.trade_id
+        WHERE t.status = 'closed'
+        GROUP BY ps.regime
         ORDER BY total_net DESC
     """)
 
@@ -291,14 +293,14 @@ def check_data_integrity(conn) -> List[Tuple[str, str, bool]]:
     except Exception as e:
         print(f"  MFE/MAE check error: {e}")
 
-    # Check 2: Causality join rate
+    # Check 2: Causality join rate (join on trade_id TEXT = TEXT)
     try:
         cursor.execute("""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN tc.trade_id IS NULL THEN 1 ELSE 0 END) as missing
             FROM trades t
-            LEFT JOIN trade_causality tc ON t.id = tc.trade_id
+            LEFT JOIN trade_causality tc ON t.trade_id = tc.trade_id
             WHERE t.status = 'closed'
         """)
         row = cursor.fetchone()

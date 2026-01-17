@@ -332,6 +332,7 @@ def check_causality_performance(conn):
     cursor = conn.cursor()
     try:
         # Join trades with trade_causality to get cause performance
+        # NOTE: Must join on trade_id TEXT = TEXT (not id INTEGER)
         cursor.execute("""
             SELECT
                 COALESCE(c.primary_cause, 'unknown') as cause,
@@ -341,7 +342,7 @@ def check_causality_performance(conn):
                 ROUND(AVG(t.pnl_after_costs_pct), 4) as avg_net_pnl,
                 ROUND(SUM(t.pnl_after_costs_pct), 4) as total_net_pnl
             FROM trades t
-            LEFT JOIN trade_causality c ON t.id = c.trade_id
+            LEFT JOIN trade_causality c ON t.trade_id = c.trade_id
             WHERE t.status = 'closed'
             GROUP BY c.primary_cause
             ORDER BY total_net_pnl DESC
