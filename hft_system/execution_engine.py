@@ -407,9 +407,10 @@ class ExecutionEngine:
         orderbook = self.ws.get_orderbook(position.symbol)
         trade_flow = self.ws.get_trade_flow(position.symbol)
 
-        # 3. MICRO PROFIT: Exit with small profit (+0.05% to +0.12%) if OB is weakening
-        # This captures edge before it disappears
-        if 0.05 <= pnl_pct < config.take_profit_pct:
+        # 3. MICRO PROFIT: Exit with profit above costs if OB is weakening
+        # Threshold must be ABOVE round-trip costs (~0.26% taker) to be net profitable
+        # BUG FIX: was 0.05% which guaranteed loss after 0.20% costs
+        if 0.28 <= pnl_pct < config.take_profit_pct:
             if orderbook:
                 current_imbalance = orderbook.imbalance_ratio
                 entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)

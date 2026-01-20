@@ -49,11 +49,11 @@ class AssetConfig:
     rsi_overbought: float = 75.0
 
     # Exit settings (STRUCTURE-BASED - let structure decide, not timers)
-    # Increased limits to give structure-based exits time to work
-    take_profit_pct: float = 0.20         # Slightly higher TP for bigger moves
-    stop_loss_pct: float = 0.12           # Slightly wider SL
+    # COST-AWARE: Thresholds must be above round-trip costs (~0.26% taker mode)
+    take_profit_pct: float = 0.40         # Must be > costs (0.26%) for net profit
+    stop_loss_pct: float = 0.15           # Slightly wider SL to reduce churn
     time_stop_seconds: int = 60           # Increased to 60s - structure exits first
-    min_profit_for_time_check: float = 0.05  # Any profit = exit at time
+    min_profit_for_time_check: float = 0.28  # Must be above costs to count as profit
     use_trailing_stop: bool = False       # Not useful for micro trades
     trailing_stop_activation: float = 0.08  # Lower activation
     trailing_stop_distance: float = 0.05   # Tight trail
