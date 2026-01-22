@@ -279,20 +279,36 @@ class WinnerGateConfig:
     # === BLOCKED REGIMES (never trade) ===
     blocked_regimes: List[str] = field(default_factory=lambda: ["mean_reversion", "liquidity_vacuum", "news_spike", "unknown"])
 
-    # === CAUSALITY FILTER (only trade when WHY is clear) ===
-    # Only trade when primary_cause is strong, block "unknown" causes
+    # === CAUSE POLICY (3-class system to fix trade starvation) ===
+    # FULL: Known profitable causes - trade with normal sizing
+    # PROBE: Unknown/testing causes - trade with tiny size (0.10x) for evidence collection
+    # BLOCK: Everything else
     causality_filter_enabled: bool = True
-    # AUDIT 2026-01-17: ob_bullish_imbalance removed - 0% win rate with 13 trades
-    allowed_causes_long: List[str] = field(default_factory=lambda: [
-        "cvd_buy_pressure",      # CVD shows buy pressure - 16.7% win rate (best)
+
+    # FULL-SIZE CAUSES (evidence: positive expectancy)
+    cause_full_allow_long: List[str] = field(default_factory=lambda: [
+        "cvd_buy_pressure",      # 16.7% WR in audit - best performer
         "price_momentum_up"      # Price moving up
-        # "ob_bullish_imbalance" REMOVED: 0% win rate, -1.86% total PnL
     ])
-    allowed_causes_short: List[str] = field(default_factory=lambda: [
-        "cvd_sell_pressure",     # CVD shows sell pressure - strong signal
-        "ob_bearish_imbalance",  # Orderbook is bearish
+    cause_full_allow_short: List[str] = field(default_factory=lambda: [
+        "cvd_sell_pressure",     # Strong signal
         "price_momentum_down"    # Price moving down
     ])
+
+    # PROBE-SIZE CAUSES (collecting evidence - 0% WR but need more data)
+    # AUDIT 2026-01-22: ob_bullish_imbalance moved to PROBE for data collection
+    cause_probe_allow_long: List[str] = field(default_factory=lambda: [
+        "ob_bullish_imbalance"   # Was 0% WR with 13 trades - need 30+ for decision
+    ])
+    cause_probe_allow_short: List[str] = field(default_factory=lambda: [
+        "ob_bearish_imbalance"   # Orderbook bearish - needs evidence
+    ])
+
+    # PROBE CONFIGURATION
+    probe_cause_size_multiplier: float = 0.10  # 10% of normal size (tiny risk)
+    probe_requires_pocket_b: bool = True       # Only probe in Pocket B (research)
+    probe_requires_maker: bool = True          # Only probe with maker mode (lower costs)
+
     block_unknown_cause: bool = True  # Block trades with no clear cause
 
     # === LEGACY SETTINGS (for backward compatibility) ===

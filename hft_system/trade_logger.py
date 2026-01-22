@@ -101,6 +101,9 @@ class TradeLogger:
                 pocket_id TEXT,
                 -- Execution mode tracking (taker vs maker)
                 execution_mode TEXT DEFAULT 'taker',
+                -- Cause policy tracking (FULL vs PROBE)
+                is_probe_cause INTEGER DEFAULT 0,
+                cause_class TEXT DEFAULT 'FULL',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -115,6 +118,8 @@ class TradeLogger:
             cursor.execute("ALTER TABLE trades ADD COLUMN pnl_after_costs_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN pocket_id TEXT")
             cursor.execute("ALTER TABLE trades ADD COLUMN execution_mode TEXT DEFAULT 'taker'")
+            cursor.execute("ALTER TABLE trades ADD COLUMN is_probe_cause INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN cause_class TEXT DEFAULT 'FULL'")
         except:
             pass  # Columns already exist
 
@@ -643,8 +648,8 @@ class TradeLogger:
         except Exception as e:
             pass  # Silently ignore database lock errors
 
-    def log_trade_entry(self, result: TradeResult, signal: Signal):
-        """Log trade entry."""
+    def log_trade_entry(self, result: TradeResult, signal: Signal, is_probe: bool = False, cause_class: str = "FULL"):
+        """Log trade entry with cause policy tracking."""
         try:
             trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"
 
@@ -652,8 +657,9 @@ class TradeLogger:
             cursor.execute("""
                 INSERT INTO trades (
                     trade_id, symbol, side, entry_price, quantity,
-                    entry_time, conditions_met, signal_confidence, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                    entry_time, conditions_met, signal_confidence, status,
+                    is_probe_cause, cause_class
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
             """, (
                 trade_id,
                 result.symbol,
@@ -662,11 +668,13 @@ class TradeLogger:
                 result.quantity,
                 result.timestamp,
                 signal.conditions_met,
-                signal.confidence
+                signal.confidence,
+                1 if is_probe else 0,
+                cause_class
             ))
 
             self.conn.commit()
-            logger.debug(f"Trade entry logged: {trade_id}")
+            logger.debug(f"Trade entry logged: {trade_id} | probe={is_probe} | class={cause_class}")
 
         except Exception as e:
             pass  # Silently ignore database lock errors

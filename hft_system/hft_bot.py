@@ -130,6 +130,9 @@ class HFTBot:
         # POCKET TRACKING: Which gate pocket allowed the trade
         self.active_pocket: dict = {}  # symbol -> pocket_id for active trade
 
+        # CAUSE POLICY TRACKING: FULL vs PROBE classification
+        self.current_cause_class: dict = {}  # symbol -> "FULL" or "PROBE"
+
         logger.info("=" * 60)
         logger.info("STRATEGY LOCKED - EDGE PRESERVATION PHASE")
         logger.info("=" * 60)
@@ -533,27 +536,56 @@ class HFTBot:
             logger.info(f"WINNER_GATE PASS [Pocket {pocket_id}]: {signal.symbol} | regime={current_regime}, tier={tier_str}, imb={current_imbalance:.3f}")
 
             # ============================================================
-            # CAUSALITY FILTER - Only trade when WHY is clear
+            # CAUSE POLICY (3-class: FULL / PROBE / BLOCK)
             # ============================================================
-            # Expert feedback: "Causality tracking shows only cvd_buy_pressure
-            # trades are profitable. Block unknown cause trades."
+            # FULL: Known profitable causes - trade with normal size
+            # PROBE: Unknown causes - trade with tiny size (0.10x) for evidence
+            # BLOCK: Everything else
             # ============================================================
             if WINNER_GATE.causality_filter_enabled:
                 primary_cause = self._determine_causality(signal, orderbook_data, trade_flow)
-
-                # Determine allowed causes based on signal type (long vs short)
                 is_long = signal.signal_type.value.lower() == "long"
-                allowed_causes = WINNER_GATE.allowed_causes_long if is_long else WINNER_GATE.allowed_causes_short
 
-                # Check if cause is allowed
-                cause_allowed = primary_cause in allowed_causes
-                cause_blocked = (WINNER_GATE.block_unknown_cause and primary_cause == "unknown")
+                # Get cause lists based on signal direction
+                full_causes = WINNER_GATE.cause_full_allow_long if is_long else WINNER_GATE.cause_full_allow_short
+                probe_causes = WINNER_GATE.cause_probe_allow_long if is_long else WINNER_GATE.cause_probe_allow_short
 
-                if not cause_allowed or cause_blocked:
-                    gate_reason = f"causality_filter: cause={primary_cause} not in {allowed_causes}" if not cause_allowed else f"causality_filter: unknown_cause_blocked"
-                    logger.info(f"CAUSALITY FILTER BLOCK: {signal.symbol} - {gate_reason}")
+                # Determine cause class
+                is_full_cause = primary_cause in full_causes
+                is_probe_cause = primary_cause in probe_causes
+                is_unknown = primary_cause == "unknown"
 
-                    # Log to blocked_signals
+                # Check PROBE constraints
+                probe_allowed = False
+                probe_block_reason = ""
+                if is_probe_cause:
+                    # PROBE requires: Pocket B + maker mode + good microstructure
+                    if WINNER_GATE.probe_requires_pocket_b and pocket_id != "B":
+                        probe_block_reason = f"probe requires Pocket B, got {pocket_id}"
+                    elif WINNER_GATE.probe_requires_maker and COST_MODEL.execution_mode != "maker":
+                        probe_block_reason = f"probe requires maker mode"
+                    else:
+                        probe_allowed = True
+
+                # Decision logic
+                if is_full_cause:
+                    # FULL: Normal trade
+                    self.current_cause_class[signal.symbol] = "FULL"
+                    logger.info(f"CAUSE POLICY PASS [FULL]: {signal.symbol} | cause={primary_cause}")
+                elif is_probe_cause and probe_allowed:
+                    # PROBE: Tiny size trade for evidence collection
+                    self.current_cause_class[signal.symbol] = "PROBE"
+                    logger.info(f"CAUSE POLICY PASS [PROBE]: {signal.symbol} | cause={primary_cause} | size={WINNER_GATE.probe_cause_size_multiplier}x")
+                else:
+                    # BLOCK: Not allowed
+                    if is_probe_cause and not probe_allowed:
+                        gate_reason = f"probe_blocked: {probe_block_reason}"
+                    elif is_unknown and WINNER_GATE.block_unknown_cause:
+                        gate_reason = "unknown_cause_blocked"
+                    else:
+                        gate_reason = f"cause={primary_cause} not in FULL{full_causes} or PROBE{probe_causes}"
+
+                    logger.info(f"CAUSE POLICY BLOCK: {signal.symbol} - {gate_reason}")
                     self.trade_logger.log_blocked_signal(
                         symbol=signal.symbol,
                         signal_type=signal.signal_type.value,
@@ -565,8 +597,6 @@ class HFTBot:
                     )
                     self.signals_blocked += 1
                     return
-                else:
-                    logger.info(f"CAUSALITY FILTER PASS: {signal.symbol} | cause={primary_cause}")
 
         # ============================================================
         # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)
@@ -641,6 +671,16 @@ class HFTBot:
             risk_decision.confidence = confidence
             risk_decision.size_adjustment_reason = adjustment_reason
 
+        # Apply PROBE sizing if cause class is PROBE (tiny size for evidence collection)
+        cause_class = self.current_cause_class.get(signal.symbol, "FULL")
+        is_probe_trade = (cause_class == "PROBE")
+        if is_probe_trade:
+            probe_mult = WINNER_GATE.probe_cause_size_multiplier
+            risk_decision.position_size *= probe_mult
+            risk_decision.position_value *= probe_mult
+            risk_decision.size_adjustment_reason = f"PROBE({probe_mult}x): {risk_decision.size_adjustment_reason or 'cause needs evidence'}"
+            logger.info(f"PROBE SIZING: {signal.symbol} | size reduced to {probe_mult}x for evidence collection")
+
         # Log signal
         self.trade_logger.log_signal(signal, risk_decision)
 
@@ -650,7 +690,7 @@ class HFTBot:
 
             if result.success:
                 self.trades_executed += 1
-                self.trade_logger.log_trade_entry(result, signal)
+                self.trade_logger.log_trade_entry(result, signal, is_probe=is_probe_trade, cause_class=cause_class)
 
                 # Log MICROSTRUCTURE trade flow at entry
                 trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"
@@ -755,6 +795,9 @@ class HFTBot:
 
         # Get pocket_id that allowed this trade
         pocket_id = self.active_pocket.pop(result.symbol, None)
+
+        # Clean up cause class tracking
+        self.current_cause_class.pop(result.symbol, None)
 
         # Log trade exit with cost model and pocket tracking
         self.trade_logger.log_trade_exit(
