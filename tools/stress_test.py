@@ -203,7 +203,8 @@ def run_stress_scenario(
     days: int,
     scenario: StressScenario,
     symbol: Optional[str] = None,
-    has_symbol_col: bool = False
+    has_symbol_col: bool = False,
+    debug: bool = False
 ) -> StressResult:
     """Run a single stress scenario."""
     config = STRESS_SCENARIOS[scenario]
@@ -217,19 +218,31 @@ def run_stress_scenario(
         where_clause += " AND symbol LIKE ?"
         params.append(f"%{symbol}%")
 
+    if debug:
+        print(f"\n  [DEBUG] Scenario: {scenario.value}")
+        print(f"  [DEBUG] WHERE clause: {where_clause}")
+        print(f"  [DEBUG] Params: {params}")
+
     # Get all closed trades with cost breakdown
+    # Use COALESCE for NULL handling and include entry/exit prices for fallback calculation
     cursor.execute(f"""
         SELECT
-            pnl_pct,
-            fees_paid_pct,
-            slippage_pct,
-            spread_cost_pct,
-            pnl_after_costs_pct
+            COALESCE(pnl_pct, 0) as pnl_pct,
+            COALESCE(fees_paid_pct, 0) as fees_paid_pct,
+            COALESCE(slippage_pct, 0) as slippage_pct,
+            COALESCE(spread_cost_pct, 0) as spread_cost_pct,
+            pnl_after_costs_pct,
+            entry_price,
+            exit_price,
+            side
         FROM trades
         {where_clause}
     """, params)
 
     rows = cursor.fetchall()
+
+    if debug:
+        print(f"  [DEBUG] Found {len(rows)} trades")
 
     if not rows:
         return StressResult(
@@ -247,13 +260,35 @@ def run_stress_scenario(
     total_original_costs = 0
     total_stressed_costs = 0
     total_stressed_pnl = 0
+    trades_with_costs = 0
 
-    for row in rows:
+    for i, row in enumerate(rows):
         gross_pnl = row[0] or 0
         fees = row[1] or 0
         slippage = row[2] or 0
         spread = row[3] or 0
-        original_net = row[4] or 0
+        original_net = row[4]
+        entry_price = row[5]
+        exit_price = row[6]
+        side = row[7]
+
+        # Fallback: compute gross PnL from prices if pnl_pct is 0 or NULL
+        if gross_pnl == 0 and entry_price and exit_price and entry_price > 0:
+            if side and side.lower() == 'short':
+                gross_pnl = (entry_price - exit_price) / entry_price * 100
+            else:  # Default to long
+                gross_pnl = (exit_price - entry_price) / entry_price * 100
+
+        # Fallback: estimate costs if all cost fields are 0
+        if fees == 0 and slippage == 0 and spread == 0:
+            # Use a reasonable estimate: 0.1% total costs (taker fees ~0.075% + spread)
+            estimated_cost = 0.10  # 0.10% per trade
+            fees = estimated_cost * 0.6  # ~60% fees
+            slippage = estimated_cost * 0.2  # ~20% slippage
+            spread = estimated_cost * 0.1  # ~10% spread per side
+
+        if fees > 0 or slippage > 0 or spread > 0:
+            trades_with_costs += 1
 
         # Calculate stressed
         stressed_costs, stressed_pnl = calculate_stressed_pnl(
@@ -269,6 +304,16 @@ def run_stress_scenario(
             wins += 1
         else:
             losses += 1
+
+        # Debug: show first 5 trades
+        if debug and i < 5:
+            print(f"  [DEBUG] Trade {i+1}: gross={gross_pnl:.4f}%, fees={fees:.4f}%, "
+                  f"slip={slippage:.4f}%, spread={spread:.4f}%, stressed_pnl={stressed_pnl:.4f}%")
+
+    if debug:
+        print(f"  [DEBUG] Trades with cost data: {trades_with_costs}/{trade_count}")
+        print(f"  [DEBUG] Total gross PnL: {total_gross_pnl:.4f}%")
+        print(f"  [DEBUG] Total stressed PnL: {total_stressed_pnl:.4f}%")
 
     win_rate = wins / trade_count * 100 if trade_count > 0 else 0
     avg_pnl = total_stressed_pnl / trade_count if trade_count > 0 else 0
@@ -294,7 +339,8 @@ def run_all_stress_tests(
     days: int,
     scenarios: List[StressScenario] = None,
     symbol: Optional[str] = None,
-    has_symbol_col: bool = False
+    has_symbol_col: bool = False,
+    debug: bool = False
 ) -> StressTestResult:
     """Run all stress test scenarios."""
     if scenarios is None:
@@ -307,8 +353,11 @@ def run_all_stress_tests(
         scenarios.remove(StressScenario.BASELINE)
         scenarios.insert(0, StressScenario.BASELINE)
 
+    if debug:
+        print("\n=== DEBUG MODE ===")
+
     for scenario in scenarios:
-        result = run_stress_scenario(conn, days, scenario, symbol, has_symbol_col)
+        result = run_stress_scenario(conn, days, scenario, symbol, has_symbol_col, debug)
         results.append(result)
 
     # Get baseline for comparison
@@ -571,6 +620,7 @@ Examples:
   python tools/stress_test.py --db hft_trades.db --days 14 --scenario all
   python tools/stress_test.py --db hft_trades.db --scenario fee_plus_50,slippage_x1_5
   python tools/stress_test.py --db hft_trades.db --json
+  python tools/stress_test.py --db hft_trades.db --days 7 --debug  # Debug mode
 
 Scenarios:
   baseline        - No stress (actual costs)
@@ -593,6 +643,8 @@ Scenarios:
     parser.add_argument("--from-best", dest="from_best", type=str, default=None,
                         help="CSV file to extract best params from (e.g., reports/xrp_wf_3way.csv)")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug output (SQL queries, sample trades)")
     args = parser.parse_args()
 
     # Find database
@@ -658,8 +710,30 @@ Scenarios:
         else:
             print(f"WARNING: Could not extract params from {args.from_best}")
 
+    # Debug: show table structure if debug mode
+    if args.debug:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(trades)")
+        columns = cursor.fetchall()
+        print("\n  [DEBUG] trades table columns:")
+        for col in columns:
+            print(f"    {col[1]} ({col[2]})")
+
+        # Show sample of trades
+        cutoff_ms = int((datetime.now() - timedelta(days=args.days)).timestamp() * 1000)
+        cursor.execute(f"""
+            SELECT trade_id, symbol, pnl_pct, fees_paid_pct, slippage_pct, spread_cost_pct, pnl_after_costs_pct
+            FROM trades
+            WHERE status = 'closed' AND entry_time > ?
+            LIMIT 5
+        """, (cutoff_ms,))
+        sample = cursor.fetchall()
+        print(f"\n  [DEBUG] Sample trades (first 5):")
+        for row in sample:
+            print(f"    {row}")
+
     # Run stress tests
-    result = run_all_stress_tests(conn, args.days, scenarios, symbol, has_symbol_col)
+    result = run_all_stress_tests(conn, args.days, scenarios, symbol, has_symbol_col, args.debug)
 
     if args.json:
         output = {

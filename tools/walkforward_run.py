@@ -56,11 +56,72 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def resolve_symbol(symbol: str, quote: str = "USDT") -> str:
+    """
+    Resolve symbol to Binance format.
+
+    Args:
+        symbol: Input symbol (e.g., "XRP", "XRPUSDT", "xrp")
+        quote: Quote currency to append if missing (default: "USDT")
+
+    Returns:
+        Resolved symbol (e.g., "XRPUSDT")
+
+    Examples:
+        >>> resolve_symbol("XRP")
+        'XRPUSDT'
+        >>> resolve_symbol("XRPUSDT")
+        'XRPUSDT'
+        >>> resolve_symbol("btc", "USDT")
+        'BTCUSDT'
+        >>> resolve_symbol("ETH", "BTC")
+        'ETHBTC'
+    """
+    symbol = symbol.upper().strip()
+    quote = quote.upper().strip()
+
+    # Remove common quote currencies to get base
+    for q in ["USDT", "BUSD", "BTC", "ETH", "BNB"]:
+        if symbol.endswith(q) and len(symbol) > len(q):
+            # Already has a quote currency
+            return symbol
+
+    # Append quote if not present
+    if not symbol.endswith(quote):
+        return symbol + quote
+    return symbol
+
+
+def test_symbol_resolution():
+    """Unit tests for symbol resolution."""
+    test_cases = [
+        ("XRP", "USDT", "XRPUSDT"),
+        ("xrp", "USDT", "XRPUSDT"),
+        ("XRPUSDT", "USDT", "XRPUSDT"),
+        ("BTC", "USDT", "BTCUSDT"),
+        ("ETH", "BTC", "ETHBTC"),
+        ("ETHBTC", "BTC", "ETHBTC"),
+        ("sol", "usdt", "SOLUSDT"),
+        ("SUIUSDT", "USDT", "SUIUSDT"),
+    ]
+
+    all_passed = True
+    for input_sym, quote, expected in test_cases:
+        result = resolve_symbol(input_sym, quote)
+        status = "PASS" if result == expected else "FAIL"
+        if result != expected:
+            all_passed = False
+        print(f"  [{status}] resolve_symbol('{input_sym}', '{quote}') = '{result}' (expected: '{expected}')")
+
+    return all_passed
+
+
 def fetch_candles_from_binance(
     symbol: str,
     start_date: datetime,
     end_date: datetime,
-    interval: str = "1m"
+    interval: str = "1m",
+    auto_quote: bool = True
 ) -> List[Dict]:
     """
     Fetch historical candles from Binance API.
@@ -70,6 +131,7 @@ def fetch_candles_from_binance(
         start_date: Start datetime
         end_date: End datetime
         interval: Candle interval (1m, 5m, etc.)
+        auto_quote: If True, retry with USDT suffix on 400 error
 
     Returns:
         List of candle dicts
@@ -82,6 +144,10 @@ def fetch_candles_from_binance(
 
     logger.info(f"Fetching {symbol} candles from {start_date.date()} to {end_date.date()}...")
 
+    # Track if we've tried the original symbol
+    original_symbol = symbol
+    tried_with_usdt = False
+
     while start_ms < end_ms:
         params = {
             "symbol": symbol,
@@ -93,6 +159,21 @@ def fetch_candles_from_binance(
 
         try:
             response = requests.get(base_url, params=params, timeout=30)
+
+            # Handle 400 error - try with USDT suffix
+            if response.status_code == 400 and auto_quote and not tried_with_usdt:
+                error_msg = response.json().get("msg", "")
+                logger.warning(f"Binance API returned 400 for symbol '{symbol}': {error_msg}")
+
+                # Try adding USDT if not present
+                if not symbol.endswith("USDT"):
+                    new_symbol = symbol + "USDT"
+                    logger.info(f"Retrying with quote currency: {symbol} -> {new_symbol}")
+                    symbol = new_symbol
+                    tried_with_usdt = True
+                    params["symbol"] = symbol
+                    response = requests.get(base_url, params=params, timeout=30)
+
             response.raise_for_status()
             data = response.json()
 
@@ -117,13 +198,22 @@ def fetch_candles_from_binance(
 
         except requests.exceptions.RequestException as e:
             logger.error(f"API error: {e}")
+            if "400" in str(e) and auto_quote and not tried_with_usdt and not symbol.endswith("USDT"):
+                new_symbol = symbol + "USDT"
+                logger.info(f"Retrying with quote currency: {symbol} -> {new_symbol}")
+                symbol = new_symbol
+                tried_with_usdt = True
+                continue
             break
         except Exception as e:
             logger.error(f"Error: {e}")
             break
 
-    logger.info(f"Fetched {len(candles)} candles")
-    return candles
+    if symbol != original_symbol:
+        logger.info(f"Successfully fetched using resolved symbol: {symbol}")
+
+    logger.info(f"Fetched {len(candles)} candles for {symbol}")
+    return candles, symbol  # Return resolved symbol too
 
 
 def export_results_to_csv(result: WalkForwardResult, filepath: str):
@@ -446,6 +536,8 @@ Examples:
     parser.add_argument("--db", type=str, default=None,
                         help="Database path (optional, currently candles fetched from Binance API)")
     parser.add_argument("--symbol", required=True, help="Trading symbol (e.g., XRPUSDT or XRP)")
+    parser.add_argument("--quote", type=str, default="USDT",
+                        help="Quote currency to append if missing (default: USDT)")
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--3way", dest="three_way", action="store_true",
@@ -475,12 +567,15 @@ Examples:
         else:
             logger.warning(f"--db specified ({args.db}) but file not found. Using Binance API for candles.")
 
-    # Normalize symbol (XRP -> XRPUSDT)
+    # Normalize symbol (XRP -> XRPUSDT based on --quote)
     symbol = args.symbol.upper()
-    if not symbol.endswith("USDT"):
-        symbol = symbol + "USDT"
-        logger.info(f"Normalized symbol: {args.symbol} -> {symbol}")
+    quote = args.quote.upper()
+    if not symbol.endswith(quote):
+        original = symbol
+        symbol = symbol + quote
+        logger.info(f"Normalized symbol with quote '{quote}': {original} -> {symbol}")
     args.symbol = symbol
+    logger.info(f"Using Binance symbol: {symbol}")
 
     # Parse dates
     try:
@@ -527,10 +622,20 @@ Examples:
     """)
 
     # Fetch candles
-    candles = fetch_candles_from_binance(args.symbol, start_date, end_date)
+    result = fetch_candles_from_binance(args.symbol, start_date, end_date)
+
+    # Handle tuple return (candles, resolved_symbol)
+    if isinstance(result, tuple):
+        candles, resolved_symbol = result
+        if resolved_symbol != args.symbol:
+            logger.info(f"Using resolved symbol from API: {resolved_symbol}")
+            args.symbol = resolved_symbol
+    else:
+        candles = result
 
     if len(candles) < 100:
         print(f"ERROR: Not enough data ({len(candles)} candles). Need at least 100.")
+        print(f"       Check if symbol '{args.symbol}' is valid on Binance.")
         return 1
 
     # Run walk-forward
