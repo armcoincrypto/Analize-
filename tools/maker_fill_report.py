@@ -7,6 +7,7 @@ compare maker vs taker execution performance.
 
 Usage:
     python tools/maker_fill_report.py --db hft_trades.db --days 7
+    python tools/maker_fill_report.py --db hft_trades.db --symbol XRP --days 30
     python tools/maker_fill_report.py --db hft_trades.db --calibrate
 
 Reports:
@@ -15,6 +16,9 @@ Reports:
     3. Cancel reason analysis
     4. Conservative fill model validation
     5. Maker vs taker cost comparison
+
+Options:
+    --symbol    Optional symbol filter (e.g., XRP, XRPUSDT). Filters data if table has symbol column.
 """
 
 import argparse
@@ -43,12 +47,20 @@ class MakerFillStats:
     avg_slippage_pct: float = 0
 
 
-def get_maker_fill_stats(conn: sqlite3.Connection, days: int) -> MakerFillStats:
+def get_maker_fill_stats(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                         has_symbol_col: bool = False) -> MakerFillStats:
     """Get aggregate maker fill statistics."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-    cursor.execute("""
+    # Build query with optional symbol filter
+    where_clause = "WHERE posted_ts > ?"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
+    cursor.execute(f"""
         SELECT
             COUNT(*) as total_orders,
             SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as filled,
@@ -58,8 +70,8 @@ def get_maker_fill_stats(conn: sqlite3.Connection, days: int) -> MakerFillStats:
             AVG(CASE WHEN status IN ('filled', 'partial') THEN fill_ratio ELSE NULL END) as avg_fill_ratio,
             AVG(CASE WHEN status IN ('filled', 'partial') THEN slippage_from_limit_pct ELSE NULL END) as avg_slippage
         FROM maker_order_telemetry
-        WHERE posted_ts > ?
-    """, (cutoff_ms,))
+        {where_clause}
+    """, params)
 
     row = cursor.fetchone()
 
@@ -82,12 +94,20 @@ def get_maker_fill_stats(conn: sqlite3.Connection, days: int) -> MakerFillStats:
     )
 
 
-def get_fill_rate_by_cross_depth(conn: sqlite3.Connection, days: int) -> Dict:
+def get_fill_rate_by_cross_depth(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                                  has_symbol_col: bool = False) -> Dict:
     """Get fill rate breakdown by price cross depth."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-    cursor.execute("""
+    # Build query with optional symbol filter
+    where_clause = "WHERE posted_ts > ?"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
+    cursor.execute(f"""
         SELECT
             CASE
                 WHEN cross_depth_bps >= 5 THEN '5+ bps'
@@ -100,7 +120,7 @@ def get_fill_rate_by_cross_depth(conn: sqlite3.Connection, days: int) -> Dict:
             SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as filled,
             AVG(time_to_fill_ms) as avg_time
         FROM maker_order_telemetry
-        WHERE posted_ts > ?
+        {where_clause}
         GROUP BY cross_bucket
         ORDER BY
             CASE cross_bucket
@@ -110,7 +130,7 @@ def get_fill_rate_by_cross_depth(conn: sqlite3.Connection, days: int) -> Dict:
                 WHEN '0-1 bps' THEN 4
                 ELSE 5
             END
-    """, (cutoff_ms,))
+    """, params)
 
     return {
         row[0]: {
@@ -123,21 +143,29 @@ def get_fill_rate_by_cross_depth(conn: sqlite3.Connection, days: int) -> Dict:
     }
 
 
-def get_cancel_reason_breakdown(conn: sqlite3.Connection, days: int) -> Dict:
+def get_cancel_reason_breakdown(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                                 has_symbol_col: bool = False) -> Dict:
     """Get breakdown of cancel reasons."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-    cursor.execute("""
+    # Build query with optional symbol filter
+    where_clause = "WHERE posted_ts > ? AND status = 'cancelled'"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
+    cursor.execute(f"""
         SELECT
             cancel_reason,
             COUNT(*) as count,
             AVG(time_to_fill_ms) as avg_time_alive
         FROM maker_order_telemetry
-        WHERE posted_ts > ? AND status = 'cancelled'
+        {where_clause}
         GROUP BY cancel_reason
         ORDER BY count DESC
-    """, (cutoff_ms,))
+    """, params)
 
     return {
         row[0] or "unknown": {
@@ -148,12 +176,20 @@ def get_cancel_reason_breakdown(conn: sqlite3.Connection, days: int) -> Dict:
     }
 
 
-def get_fill_model_validation(conn: sqlite3.Connection, days: int) -> Dict:
+def get_fill_model_validation(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                               has_symbol_col: bool = False) -> Dict:
     """Validate conservative fill model accuracy."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-    cursor.execute("""
+    # Build query with optional symbol filter
+    where_clause = "WHERE posted_ts > ? AND would_fill_conservative IS NOT NULL"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
+    cursor.execute(f"""
         SELECT
             -- True Positives: Model said fill, actually filled
             SUM(CASE WHEN would_fill_conservative = 1 AND status = 'filled' THEN 1 ELSE 0 END) as true_positive,
@@ -165,8 +201,8 @@ def get_fill_model_validation(conn: sqlite3.Connection, days: int) -> Dict:
             SUM(CASE WHEN would_fill_conservative = 0 AND status = 'filled' THEN 1 ELSE 0 END) as false_negative,
             COUNT(*) as total
         FROM maker_order_telemetry
-        WHERE posted_ts > ? AND would_fill_conservative IS NOT NULL
-    """, (cutoff_ms,))
+        {where_clause}
+    """, params)
 
     row = cursor.fetchone()
 
@@ -194,12 +230,20 @@ def get_fill_model_validation(conn: sqlite3.Connection, days: int) -> Dict:
     }
 
 
-def get_time_to_fill_distribution(conn: sqlite3.Connection, days: int) -> Dict:
+def get_time_to_fill_distribution(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                                   has_symbol_col: bool = False) -> Dict:
     """Get time to fill distribution."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-    cursor.execute("""
+    # Build query with optional symbol filter
+    where_clause = "WHERE posted_ts > ? AND status IN ('filled', 'partial')"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
+    cursor.execute(f"""
         SELECT
             CASE
                 WHEN time_to_fill_ms < 100 THEN '<100ms'
@@ -212,7 +256,7 @@ def get_time_to_fill_distribution(conn: sqlite3.Connection, days: int) -> Dict:
             END as time_bucket,
             COUNT(*) as count
         FROM maker_order_telemetry
-        WHERE posted_ts > ? AND status IN ('filled', 'partial')
+        {where_clause}
         GROUP BY time_bucket
         ORDER BY
             CASE time_bucket
@@ -224,18 +268,26 @@ def get_time_to_fill_distribution(conn: sqlite3.Connection, days: int) -> Dict:
                 WHEN '10-30s' THEN 6
                 ELSE 7
             END
-    """, (cutoff_ms,))
+    """, params)
 
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
-def get_maker_vs_taker_comparison(conn: sqlite3.Connection, days: int) -> Dict:
+def get_maker_vs_taker_comparison(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                                   has_trades_symbol: bool = False) -> Dict:
     """Compare maker vs taker execution costs and performance."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
+    # Build query with optional symbol filter
+    where_clause = "WHERE entry_time > ? AND status = 'closed'"
+    params = [cutoff_ms]
+    if symbol and has_trades_symbol:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
     # Get trades by execution mode
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT
             execution_mode,
             COUNT(*) as trades,
@@ -246,9 +298,9 @@ def get_maker_vs_taker_comparison(conn: sqlite3.Connection, days: int) -> Dict:
             AVG(pnl_after_costs_pct) as avg_net_pnl,
             SUM(CASE WHEN pnl_after_costs_pct > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
         FROM trades
-        WHERE entry_time > ? AND status = 'closed'
+        {where_clause}
         GROUP BY execution_mode
-    """, (cutoff_ms,))
+    """, params)
 
     comparison = {}
     for row in cursor.fetchall():
@@ -273,20 +325,28 @@ def get_maker_vs_taker_comparison(conn: sqlite3.Connection, days: int) -> Dict:
     return comparison
 
 
-def calibrate_fill_model(conn: sqlite3.Connection, days: int) -> Dict:
+def calibrate_fill_model(conn: sqlite3.Connection, days: int, symbol: Optional[str] = None,
+                          has_symbol_col: bool = False) -> Dict:
     """Generate calibrated fill model parameters from data."""
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
+    # Build query with optional symbol filter
+    where_clause = "WHERE posted_ts > ? AND cross_depth_bps IS NOT NULL"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
     # Get fill rates by cross depth
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT
             cross_depth_bps,
             CASE WHEN status = 'filled' THEN 1 ELSE 0 END as filled
         FROM maker_order_telemetry
-        WHERE posted_ts > ? AND cross_depth_bps IS NOT NULL
+        {where_clause}
         ORDER BY cross_depth_bps
-    """, (cutoff_ms,))
+    """, params)
 
     rows = cursor.fetchall()
 
@@ -337,13 +397,16 @@ def print_report(
     fill_model: Dict,
     time_dist: Dict,
     comparison: Dict,
-    days: int
+    days: int,
+    symbol: Optional[str] = None
 ):
     """Print formatted maker fill report."""
+    symbol_line = f"| Symbol:  {symbol}" if symbol else "| Symbol:  ALL (global)"
     print(f"""
 +================================================================================+
 |                      MAKER ORDER FILL ANALYSIS REPORT                          |
 +================================================================================+
+{symbol_line}
 | Period:  Last {days} days
 | Orders:  {stats.total_orders}
 +================================================================================+
@@ -454,6 +517,22 @@ def print_calibration(calibration: Dict):
     print()
 
 
+def check_column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cursor.fetchall()]
+    return column in columns
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbol for LIKE query (XRP -> XRP, XRPUSDT -> XRP)."""
+    symbol = symbol.upper()
+    if symbol.endswith("USDT"):
+        return symbol[:-4]
+    return symbol
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Maker Fill Analysis Report",
@@ -461,11 +540,14 @@ def main():
         epilog="""
 Examples:
   python tools/maker_fill_report.py --db hft_trades.db --days 7
+  python tools/maker_fill_report.py --db hft_trades.db --symbol XRP --days 30
   python tools/maker_fill_report.py --db hft_trades.db --calibrate
   python tools/maker_fill_report.py --db hft_trades.db --json
         """
     )
     parser.add_argument("--db", default="hft_trades.db", help="Database path")
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Symbol filter (e.g., XRP, XRPUSDT). Filters if table has symbol column.")
     parser.add_argument("--days", type=int, default=7, help="Analysis period (days)")
     parser.add_argument("--calibrate", action="store_true", help="Show fill model calibration")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
@@ -501,23 +583,39 @@ Examples:
         print("       Maker telemetry logging must be enabled first.")
         return 1
 
+    # Check for symbol columns in tables
+    has_maker_symbol = check_column_exists(conn, "maker_order_telemetry", "symbol")
+    has_trades_symbol = check_column_exists(conn, "trades", "symbol")
+
+    # Normalize symbol filter
+    symbol = None
+    if args.symbol:
+        symbol = normalize_symbol(args.symbol)
+        if not has_maker_symbol:
+            print(f"WARNING: --symbol {args.symbol} specified but maker_order_telemetry table has no symbol column.")
+            print("         Running global analysis (all symbols).")
+            symbol = None
+        else:
+            print(f"Filtering by symbol: {symbol}")
+
     if args.calibrate:
-        calibration = calibrate_fill_model(conn, args.days)
+        calibration = calibrate_fill_model(conn, args.days, symbol, has_maker_symbol)
         if args.json:
             print(json.dumps(calibration, indent=2))
         else:
             print_calibration(calibration)
     else:
         # Gather all stats
-        stats = get_maker_fill_stats(conn, args.days)
-        cross_breakdown = get_fill_rate_by_cross_depth(conn, args.days)
-        cancel_reasons = get_cancel_reason_breakdown(conn, args.days)
-        fill_model = get_fill_model_validation(conn, args.days)
-        time_dist = get_time_to_fill_distribution(conn, args.days)
-        comparison = get_maker_vs_taker_comparison(conn, args.days)
+        stats = get_maker_fill_stats(conn, args.days, symbol, has_maker_symbol)
+        cross_breakdown = get_fill_rate_by_cross_depth(conn, args.days, symbol, has_maker_symbol)
+        cancel_reasons = get_cancel_reason_breakdown(conn, args.days, symbol, has_maker_symbol)
+        fill_model = get_fill_model_validation(conn, args.days, symbol, has_maker_symbol)
+        time_dist = get_time_to_fill_distribution(conn, args.days, symbol, has_maker_symbol)
+        comparison = get_maker_vs_taker_comparison(conn, args.days, symbol, has_trades_symbol)
 
         if args.json:
             output = {
+                "symbol": symbol or "ALL",
                 "stats": {
                     "total_orders": stats.total_orders,
                     "filled": stats.filled_orders,
@@ -536,12 +634,13 @@ Examples:
             print(json.dumps(output, indent=2))
         else:
             if stats.total_orders == 0:
-                print(f"No maker orders found in the last {args.days} days")
+                print(f"No maker orders found in the last {args.days} days" +
+                      (f" for symbol {symbol}" if symbol else ""))
                 return 0
 
             print_report(
                 stats, cross_breakdown, cancel_reasons,
-                fill_model, time_dist, comparison, args.days
+                fill_model, time_dist, comparison, args.days, symbol
             )
 
     conn.close()

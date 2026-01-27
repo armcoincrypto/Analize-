@@ -102,6 +102,78 @@ analize report --date 2024-01-15 --symbol BTCUSDT --output report.json
 analize storage-stats
 ```
 
+## HFT Research Tools (Standardized CLI)
+
+The `tools/` directory contains research and analysis tools with standardized CLI arguments:
+
+### Walk-Forward Optimization
+
+```bash
+# Basic 3-way walk-forward (prevents overfitting)
+python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-03-01 --3way
+
+# With database path and alias for --final-test-days
+python tools/walkforward_run.py --db hft_trades.db --symbol XRP --final-days 7 --3way \
+    --start 2024-01-01 --end 2024-03-01
+
+# Custom parameter grid
+python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-02-01 \
+    --grid "tp=0.2,0.3,0.4; sl=0.1,0.15; tstop=30,60"
+```
+
+### Maker Fill Analysis
+
+```bash
+# Global analysis (all symbols)
+python tools/maker_fill_report.py --db hft_trades.db --days 7
+
+# Filter by symbol
+python tools/maker_fill_report.py --db hft_trades.db --symbol XRP --days 30
+
+# Calibrate fill model
+python tools/maker_fill_report.py --db hft_trades.db --calibrate
+```
+
+### Strategy Stress Testing
+
+```bash
+# Basic stress test
+python tools/stress_test.py --db hft_trades.db --days 7
+
+# Filter by symbol
+python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30
+
+# Load best params from walk-forward CSV and run stress test
+python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30 \
+    --from-best reports/xrp_wf_3way.csv
+```
+
+### Complete Workflow Example
+
+```bash
+# 1. Run walk-forward optimization
+python tools/walkforward_run.py --db hft_trades.db --symbol XRP --final-days 7 --3way \
+    --start 2024-01-01 --end 2024-03-01
+
+# 2. Analyze maker fills
+python tools/maker_fill_report.py --db hft_trades.db --symbol XRP --days 30
+
+# 3. Stress test with best params from walk-forward
+python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30 \
+    --from-best reports/walkforward_3way_XRPUSDT_*.csv
+```
+
+### Common Options
+
+| Option | Description |
+|--------|-------------|
+| `--db` | Database path (default: hft_trades.db) |
+| `--symbol` | Symbol filter (e.g., XRP, XRPUSDT) |
+| `--days` | Analysis period in days |
+| `--json` | Output as JSON |
+| `--final-days` | Alias for --final-test-days (walkforward) |
+| `--from-best` | Load params from CSV (stress_test) |
+
 ## API Endpoints
 
 | Endpoint | Method | Description |

@@ -14,6 +14,8 @@ A strategy must pass stress tests to be eligible for LIVE trading.
 
 Usage:
     python tools/stress_test.py --db hft_trades.db --days 7
+    python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30
+    python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30 --from-best reports/xrp_wf_3way.csv
     python tools/stress_test.py --db hft_trades.db --days 14 --scenario all
     python tools/stress_test.py --db hft_trades.db --json
 
@@ -21,6 +23,10 @@ Output:
     - PASS/FAIL for each stress scenario
     - Degradation metrics (how much PnL decreased)
     - Recommendation for promotion
+
+Options:
+    --symbol     Optional symbol filter (e.g., XRP, XRPUSDT)
+    --from-best  Pick top candidate row from CSV, print params for reference
 """
 
 import argparse
@@ -195,15 +201,24 @@ def calculate_stressed_pnl(
 def run_stress_scenario(
     conn: sqlite3.Connection,
     days: int,
-    scenario: StressScenario
+    scenario: StressScenario,
+    symbol: Optional[str] = None,
+    has_symbol_col: bool = False
 ) -> StressResult:
     """Run a single stress scenario."""
     config = STRESS_SCENARIOS[scenario]
     cursor = conn.cursor()
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
+    # Build query with optional symbol filter
+    where_clause = "WHERE status = 'closed' AND entry_time > ?"
+    params = [cutoff_ms]
+    if symbol and has_symbol_col:
+        where_clause += " AND symbol LIKE ?"
+        params.append(f"%{symbol}%")
+
     # Get all closed trades with cost breakdown
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT
             pnl_pct,
             fees_paid_pct,
@@ -211,8 +226,8 @@ def run_stress_scenario(
             spread_cost_pct,
             pnl_after_costs_pct
         FROM trades
-        WHERE status = 'closed' AND entry_time > ?
-    """, (cutoff_ms,))
+        {where_clause}
+    """, params)
 
     rows = cursor.fetchall()
 
@@ -277,7 +292,9 @@ def run_stress_scenario(
 def run_all_stress_tests(
     conn: sqlite3.Connection,
     days: int,
-    scenarios: List[StressScenario] = None
+    scenarios: List[StressScenario] = None,
+    symbol: Optional[str] = None,
+    has_symbol_col: bool = False
 ) -> StressTestResult:
     """Run all stress test scenarios."""
     if scenarios is None:
@@ -291,7 +308,7 @@ def run_all_stress_tests(
         scenarios.insert(0, StressScenario.BASELINE)
 
     for scenario in scenarios:
-        result = run_stress_scenario(conn, days, scenario)
+        result = run_stress_scenario(conn, days, scenario, symbol, has_symbol_col)
         results.append(result)
 
     # Get baseline for comparison
@@ -384,15 +401,18 @@ def run_all_stress_tests(
     )
 
 
-def print_stress_report(result: StressTestResult):
+def print_stress_report(result: StressTestResult, symbol: Optional[str] = None,
+                        best_params: Optional[Dict] = None):
     """Print formatted stress test report."""
     status = "PASS" if result.all_passed else "FAIL"
     status_icon = "+" if result.all_passed else "x"
+    symbol_line = f"| Symbol:           {symbol}" if symbol else "| Symbol:           ALL (global)"
 
     print(f"""
 +================================================================================+
 |                        STRATEGY STRESS TEST REPORT                             |
 +================================================================================+
+{symbol_line}
 | Period:           Last {result.period_days} days
 | Baseline PnL:     {result.baseline_pnl_pct:+.4f}%
 | Baseline Costs:   {result.baseline_costs_pct:.4f}%
@@ -425,6 +445,13 @@ def print_stress_report(result: StressTestResult):
   {result.recommendation}
 """)
 
+    # Show best params if available
+    if best_params:
+        print("  --- REFERENCE PARAMS (from --from-best) ---")
+        for k, v in best_params.items():
+            print(f"  {k}: {v}")
+        print()
+
     # Key thresholds explanation
     print("""  --- STRESS TEST CRITERIA ---
   PASS requires:
@@ -439,6 +466,99 @@ def print_stress_report(result: StressTestResult):
 """)
 
 
+def check_column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cursor.fetchall()]
+    return column in columns
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbol for LIKE query (XRP -> XRP, XRPUSDT -> XRP)."""
+    symbol = symbol.upper()
+    if symbol.endswith("USDT"):
+        return symbol[:-4]
+    return symbol
+
+
+def load_best_from_csv(csv_path: str) -> Optional[Dict]:
+    """
+    Load best candidate from walk-forward CSV.
+    Returns dict with params from top row.
+    """
+    import csv as csv_module
+    try:
+        with open(csv_path, 'r') as f:
+            reader = csv_module.reader(f)
+            rows = list(reader)
+
+        # Find WINDOW DETAILS section
+        header_idx = None
+        for i, row in enumerate(rows):
+            if row and "Window" in row[0] and "TP %" in str(row):
+                header_idx = i
+                break
+
+        if header_idx is None:
+            # Try alternate format - look for parameter frequency section
+            for i, row in enumerate(rows):
+                if row and "BEST PARAMETERS FREQUENCY" in str(row):
+                    # Next non-empty row after header should have params
+                    for j in range(i + 2, min(i + 10, len(rows))):
+                        if rows[j] and rows[j][0] and "tp=" in rows[j][0].lower():
+                            param_str = rows[j][0]
+                            # Parse "tp=0.2, sl=0.15, tstop=60" format
+                            params = {}
+                            for part in param_str.split(","):
+                                if "=" in part:
+                                    k, v = part.strip().split("=")
+                                    k = k.strip().lower()
+                                    try:
+                                        v = float(v.strip())
+                                    except ValueError:
+                                        v = v.strip()
+                                    params[k] = v
+                            if params:
+                                return params
+                    break
+
+        # Parse first data row after header
+        if header_idx is not None and header_idx + 1 < len(rows):
+            header = rows[header_idx]
+            data_row = rows[header_idx + 1]
+
+            # Find column indices
+            tp_idx = next((i for i, h in enumerate(header) if "TP" in str(h).upper()), None)
+            sl_idx = next((i for i, h in enumerate(header) if "SL" in str(h).upper()), None)
+            ts_idx = next((i for i, h in enumerate(header) if "TS" in str(h).upper() or "Time Stop" in str(h)), None)
+
+            params = {}
+            if tp_idx is not None and tp_idx < len(data_row):
+                try:
+                    params["tp"] = float(data_row[tp_idx])
+                except (ValueError, IndexError):
+                    pass
+            if sl_idx is not None and sl_idx < len(data_row):
+                try:
+                    params["sl"] = float(data_row[sl_idx])
+                except (ValueError, IndexError):
+                    pass
+            if ts_idx is not None and ts_idx < len(data_row):
+                try:
+                    params["tstop"] = float(data_row[ts_idx])
+                except (ValueError, IndexError):
+                    pass
+
+            if params:
+                return params
+
+        return None
+    except Exception as e:
+        print(f"ERROR: Failed to parse CSV: {e}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Strategy Stress Testing",
@@ -446,6 +566,8 @@ def main():
         epilog="""
 Examples:
   python tools/stress_test.py --db hft_trades.db --days 7
+  python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30
+  python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30 --from-best reports/xrp_wf_3way.csv
   python tools/stress_test.py --db hft_trades.db --days 14 --scenario all
   python tools/stress_test.py --db hft_trades.db --scenario fee_plus_50,slippage_x1_5
   python tools/stress_test.py --db hft_trades.db --json
@@ -463,9 +585,13 @@ Scenarios:
         """
     )
     parser.add_argument("--db", default="hft_trades.db", help="Database path")
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Symbol filter (e.g., XRP, XRPUSDT)")
     parser.add_argument("--days", type=int, default=7, help="Analysis period (days)")
     parser.add_argument("--scenario", type=str, default="all",
                         help="Scenarios to run (comma-separated or 'all')")
+    parser.add_argument("--from-best", dest="from_best", type=str, default=None,
+                        help="CSV file to extract best params from (e.g., reports/xrp_wf_3way.csv)")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
@@ -501,17 +627,50 @@ Scenarios:
     # Connect
     conn = sqlite3.connect(str(db_path))
 
+    # Check for symbol column in trades table
+    has_symbol_col = check_column_exists(conn, "trades", "symbol")
+
+    # Normalize symbol filter
+    symbol = None
+    if args.symbol:
+        symbol = normalize_symbol(args.symbol)
+        if not has_symbol_col:
+            print(f"WARNING: --symbol {args.symbol} specified but trades table has no symbol column.")
+            print("         Running global analysis (all symbols).")
+            symbol = None
+        else:
+            print(f"Filtering by symbol: {symbol}")
+
+    # Handle --from-best option
+    best_params = None
+    if args.from_best:
+        csv_path = Path(args.from_best)
+        if not csv_path.exists():
+            print(f"ERROR: CSV file not found: {args.from_best}")
+            return 1
+        best_params = load_best_from_csv(str(csv_path))
+        if best_params:
+            print(f"\n  --- BEST PARAMS FROM CSV ---")
+            print(f"  Source: {args.from_best}")
+            for k, v in best_params.items():
+                print(f"  {k}: {v}")
+            print()
+        else:
+            print(f"WARNING: Could not extract params from {args.from_best}")
+
     # Run stress tests
-    result = run_all_stress_tests(conn, args.days, scenarios)
+    result = run_all_stress_tests(conn, args.days, scenarios, symbol, has_symbol_col)
 
     if args.json:
         output = {
+            "symbol": symbol or "ALL",
             "period_days": result.period_days,
             "baseline_pnl_pct": result.baseline_pnl_pct,
             "baseline_costs_pct": result.baseline_costs_pct,
             "all_passed": result.all_passed,
             "critical_failures": result.critical_failures,
             "recommendation": result.recommendation,
+            "best_params_from_csv": best_params,
             "scenarios": [
                 {
                     "name": r.config.name,
@@ -535,10 +694,11 @@ Scenarios:
         print(json.dumps(output, indent=2))
     else:
         if result.baseline_pnl_pct == 0 and not any(r.trade_count > 0 for r in result.results):
-            print(f"ERROR: No trades found in the last {args.days} days")
+            symbol_msg = f" for symbol {symbol}" if symbol else ""
+            print(f"ERROR: No trades found in the last {args.days} days{symbol_msg}")
             return 1
 
-        print_stress_report(result)
+        print_stress_report(result, symbol, best_params)
 
     conn.close()
 

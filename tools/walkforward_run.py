@@ -6,6 +6,7 @@ Run walk-forward optimization with parameter sweep.
 
 Usage:
     python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-02-01
+    python tools/walkforward_run.py --db hft_trades.db --symbol XRP --final-days 7 --3way
     python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-02-01 \
         --train-days 14 --test-days 7 \
         --grid "tp=0.2,0.3,0.4; sl=0.1,0.15; tstop=30,60"
@@ -17,6 +18,10 @@ Output:
 Requirements:
     - Requires historical candle data from Binance API
     - Or cached data in a local file
+
+Options:
+    --db           Optional database path (currently uses Binance API for candles)
+    --final-days   Alias for --final-test-days (3-way split mode)
 """
 
 import argparse
@@ -425,6 +430,10 @@ Examples:
   # 3-way split (recommended - prevents overfitting)
   python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-03-01 --3way
 
+  # With database path (standardized CLI)
+  python tools/walkforward_run.py --db hft_trades.db --symbol XRP --final-days 7 --3way \\
+      --start 2024-01-01 --end 2024-03-01
+
   # Custom split sizes
   python tools/walkforward_run.py --symbol BTCUSDT --start 2024-01-01 --end 2024-03-01 \\
       --3way --train-days 21 --valid-days 7 --final-test-days 7
@@ -434,7 +443,9 @@ Examples:
       --grid "tp=0.2,0.3; sl=0.1,0.15; tstop=60,90"
         """
     )
-    parser.add_argument("--symbol", required=True, help="Trading symbol (e.g., XRPUSDT)")
+    parser.add_argument("--db", type=str, default=None,
+                        help="Database path (optional, currently candles fetched from Binance API)")
+    parser.add_argument("--symbol", required=True, help="Trading symbol (e.g., XRPUSDT or XRP)")
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--3way", dest="three_way", action="store_true",
@@ -443,12 +454,33 @@ Examples:
     parser.add_argument("--test-days", type=int, default=7, help="Test window days (default: 7, used for 2-way)")
     parser.add_argument("--valid-days", type=int, default=7, help="Validation window days (default: 7, used for 3-way)")
     parser.add_argument("--final-test-days", type=int, default=7, help="Final test window days (default: 7, used for 3-way)")
+    parser.add_argument("--final-days", type=int, default=None,
+                        help="Alias for --final-test-days (for standardized CLI)")
     parser.add_argument("--top-n-validate", type=int, default=5, help="Top N candidates to validate (default: 5, used for 3-way)")
     parser.add_argument("--grid", type=str, help="Parameter grid (e.g., 'tp=0.2,0.3,0.4; sl=0.1,0.15; tstop=30,60')")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--output-dir", default="reports", help="Output directory for CSV (default: reports)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
     args = parser.parse_args()
+
+    # Handle --final-days alias
+    if args.final_days is not None:
+        args.final_test_days = args.final_days
+
+    # Handle --db argument (currently just warns, candles come from Binance)
+    if args.db:
+        db_path = Path(args.db)
+        if db_path.exists():
+            logger.warning(f"--db specified ({args.db}) but backtest uses Binance API for candles. DB ignored.")
+        else:
+            logger.warning(f"--db specified ({args.db}) but file not found. Using Binance API for candles.")
+
+    # Normalize symbol (XRP -> XRPUSDT)
+    symbol = args.symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol = symbol + "USDT"
+        logger.info(f"Normalized symbol: {args.symbol} -> {symbol}")
+    args.symbol = symbol
 
     # Parse dates
     try:
