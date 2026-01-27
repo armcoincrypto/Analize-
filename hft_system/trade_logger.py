@@ -2082,18 +2082,32 @@ class TradeLogger:
         final_quantity: float,
         final_value: float,
         confidence_data: dict,
-        context_data: dict = None
+        context_data: dict = None,
+        # New: Multiplier tracking for single-probe audit
+        base_size: float = None,
+        applied_multipliers: list = None,
+        final_size: float = None,
+        is_probe_trade: bool = False
     ):
         """
         TASK 12: Log position sizing decision with confidence scoring.
 
         Records both base sizing and confidence-adjusted final sizing
         for analysis of adaptive sizing performance.
+
+        New multiplier tracking (Part 2 - Single Probe):
+        - base_size: Original size before any multipliers
+        - applied_multipliers: List of multipliers applied (e.g., ["cause_probe=0.10", "confidence=1.5"])
+        - final_size: Final size after all multipliers
+        - is_probe_trade: True if this is a PROBE cause trade (0.10x size)
         """
         try:
             context_data = context_data or {}
             base_pct = (base_value / 10000) * 100  # Assume $10k capital
             final_pct = (final_value / 10000) * 100
+
+            # Serialize multipliers list to JSON
+            multipliers_json = json.dumps(applied_multipliers or [])
 
             cursor = self.conn.cursor()
             cursor.execute("""
@@ -2104,8 +2118,9 @@ class TradeLogger:
                     orderbook_score, regime_score, causality_score, edge_persistence_score,
                     size_multiplier, final_position_pct, final_position_value, final_quantity,
                     adjustment_reason, confidence_reasoning,
-                    regime, orderbook_imbalance, spread_pct, primary_cause
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    regime, orderbook_imbalance, spread_pct, primary_cause,
+                    base_size, applied_multipliers, final_size, is_probe_trade
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
                 trade_id,
@@ -2128,10 +2143,15 @@ class TradeLogger:
                 context_data.get("regime", "unknown"),
                 round(context_data.get("orderbook_imbalance", 0), 4),
                 round(context_data.get("spread_pct", 0), 4),
-                context_data.get("primary_cause", "unknown")
+                context_data.get("primary_cause", "unknown"),
+                round(base_size, 6) if base_size else None,
+                multipliers_json,
+                round(final_size, 6) if final_size else None,
+                1 if is_probe_trade else 0
             ))
             self.conn.commit()
-            logger.debug(f"Position sizing logged: {trade_id} - tier={confidence_data.get('tier')}")
+            probe_label = " [PROBE]" if is_probe_trade else ""
+            logger.debug(f"Position sizing logged: {trade_id} - tier={confidence_data.get('tier')}{probe_label}")
         except Exception as e:
             pass  # Silently ignore database lock errors
 

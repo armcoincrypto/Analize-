@@ -697,7 +697,10 @@ class HFTBot:
 
         if risk_decision.approved:
             # Execute trade with adjusted sizing
-            result = await self.execution_engine.execute_entry(signal, risk_decision)
+            # Pass is_cause_probe to avoid double-reduction (cause probe + execution probe)
+            result = await self.execution_engine.execute_entry(
+                signal, risk_decision, is_cause_probe=is_probe_trade
+            )
 
             if result.success:
                 self.trades_executed += 1

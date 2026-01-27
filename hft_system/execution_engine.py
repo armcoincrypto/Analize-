@@ -145,9 +145,20 @@ class ExecutionEngine:
 
         logger.info(f"ExecutionEngine initialized in {self.mode.value} mode")
 
-    async def execute_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
+    async def execute_entry(
+        self,
+        signal: Signal,
+        risk_decision: RiskDecision,
+        is_cause_probe: bool = False
+    ) -> TradeResult:
         """
         Execute entry for a signal.
+
+        Args:
+            signal: The trading signal
+            risk_decision: Position sizing decision
+            is_cause_probe: If True, this is already a PROBE cause trade
+                           (skip execution probe to avoid double-reduction)
 
         In PAPER mode, instantly fills at signal price.
         """
@@ -164,10 +175,10 @@ class ExecutionEngine:
 
         if self.mode == TradingMode.PAPER:
             # Paper trading - instant fill
-            return await self._paper_entry(signal, risk_decision)
+            return await self._paper_entry(signal, risk_decision, is_cause_probe)
         elif self.mode == TradingMode.LIVE:
             # Live trading - would submit to exchange
-            return await self._live_entry(signal, risk_decision)
+            return await self._live_entry(signal, risk_decision, is_cause_probe)
         else:
             return TradeResult(
                 success=False,
@@ -179,8 +190,19 @@ class ExecutionEngine:
                 error=f"Unknown mode: {self.mode}"
             )
 
-    async def _paper_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
-        """Execute paper trade entry with 2-phase probe logic."""
+    async def _paper_entry(
+        self,
+        signal: Signal,
+        risk_decision: RiskDecision,
+        is_cause_probe: bool = False
+    ) -> TradeResult:
+        """Execute paper trade entry with conditional 2-phase probe logic.
+
+        Args:
+            is_cause_probe: If True, this is already a PROBE cause trade.
+                           Skip the execution probe (0.25x) to avoid double-reduction.
+                           PROBE cause already applied 0.10x in hft_bot.py.
+        """
         # Simulate small slippage (0.01-0.03%)
         slippage = signal.entry_price * 0.0002  # 0.02% average
         if signal.signal_type == SignalType.LONG:
@@ -188,19 +210,43 @@ class ExecutionEngine:
         else:
             fill_price = signal.entry_price - slippage
 
-        # 2-PHASE ENTRY: Start with 0.25x probe size
-        # Will scale up to full size if confirmed after 10s
-        probe_multiplier = 0.25
-        probe_size = risk_decision.position_size * probe_multiplier
+        # ============================================================
+        # SINGLE-PROBE LOGIC: Only one probe multiplier should apply
+        # ============================================================
+        # If is_cause_probe=True: PROBE cause already applied 0.10x in hft_bot.py
+        #   -> Use risk_decision.position_size directly (no additional reduction)
+        # If is_cause_probe=False: Apply 2-phase execution probe (0.25x)
+        #   -> Will scale up to full size if confirmed after 10s
+        # ============================================================
+        if is_cause_probe:
+            # PROBE cause: size already reduced to 0.10x - use as-is
+            final_size = risk_decision.position_size
+            probe_label = "CAUSE_PROBE"
+            exec_multiplier = 1.0  # No additional reduction
+        else:
+            # Normal trade: apply 2-phase execution probe
+            exec_multiplier = 0.25
+            final_size = risk_decision.position_size * exec_multiplier
+            probe_label = "EXEC_PROBE 0.25x"
 
-        # Create position in risk controller with probe size
+        # Safety clamp: minimum 0.10x of base position
+        # (prevents accidentally tiny positions from bugs)
+        min_size = risk_decision.position_size * 0.10 if not is_cause_probe else final_size
+        if final_size < min_size:
+            logger.warning(f"Safety clamp: {final_size:.4f} < min {min_size:.4f}, using min")
+            final_size = min_size
+
+        # Create position in risk controller
         signal.entry_price = fill_price
-        position = self.risk.open_position(signal, probe_size)
+        position = self.risk.open_position(signal, final_size)
 
         # Track probe state
-        self.is_probe_position[signal.symbol] = True
-        self.probe_confirmed[signal.symbol] = False
+        self.is_probe_position[signal.symbol] = not is_cause_probe  # Only track exec probes
+        self.probe_confirmed[signal.symbol] = is_cause_probe  # Cause probes are "pre-confirmed"
         self.probe_start_time[signal.symbol] = time.time()
+
+        # Store the actual multiplier applied for logging
+        self.applied_exec_multiplier = exec_multiplier if not is_cause_probe else 1.0
 
         # Initialize MFE/MAE tracking
         self.position_mfe[signal.symbol] = 0
@@ -227,16 +273,16 @@ class ExecutionEngine:
             symbol=signal.symbol,
             side=signal.signal_type.value,
             entry_price=fill_price,
-            quantity=probe_size,  # Use probe size initially
+            quantity=final_size,
             timestamp=int(time.time() * 1000),
             order_id=position.position_id
         )
 
-        probe_value = probe_size * fill_price
+        final_value = final_size * fill_price
         logger.info(
-            f"PAPER ENTRY [PROBE 0.25x]: {signal.symbol} {signal.signal_type.value} | "
-            f"Price: ${fill_price:.4f} | Qty: {probe_size:.4f} | "
-            f"Value: ${probe_value:.2f} (full: ${risk_decision.position_value:.2f})"
+            f"PAPER ENTRY [{probe_label}]: {signal.symbol} {signal.signal_type.value} | "
+            f"Price: ${fill_price:.4f} | Qty: {final_size:.4f} | "
+            f"Value: ${final_value:.2f} (full: ${risk_decision.position_value:.2f})"
         )
 
         if self.on_trade:
@@ -244,11 +290,16 @@ class ExecutionEngine:
 
         return result
 
-    async def _live_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
+    async def _live_entry(
+        self,
+        signal: Signal,
+        risk_decision: RiskDecision,
+        is_cause_probe: bool = False
+    ) -> TradeResult:
         """Execute live trade entry (placeholder)."""
         # TODO: Implement actual exchange order submission
         logger.warning("LIVE trading not implemented - using paper mode")
-        return await self._paper_entry(signal, risk_decision)
+        return await self._paper_entry(signal, risk_decision, is_cause_probe)
 
     async def check_exits(self):
         """

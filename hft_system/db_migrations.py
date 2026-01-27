@@ -107,6 +107,11 @@ REQUIRED_SCHEMA: Dict[str, List[Tuple[str, str, str]]] = {
         ("size_multiplier", "REAL", None),
         ("regime", "TEXT", None),
         ("primary_cause", "TEXT", None),
+        # Multiplier tracking (for single-probe audit)
+        ("base_size", "REAL", None),
+        ("applied_multipliers", "TEXT", None),  # JSON list: ["cause_probe=0.10", "confidence=1.5"]
+        ("final_size", "REAL", None),
+        ("is_probe_trade", "INTEGER", "0"),
     ],
     "daily_stats": [
         ("date", "TEXT", None),
