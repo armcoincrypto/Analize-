@@ -7,6 +7,7 @@ Evaluates if paper trading results meet the criteria for live promotion.
 Usage:
     python tools/promotion_check.py --db hft_trades.db --days 7
     python tools/promotion_check.py --db hft_trades.db --days 14 --strict
+    python tools/promotion_check.py --db hft_trades.db --days 7 --require-stress
 
 Conditions checked:
     1. Net PnL after costs > 0
@@ -15,6 +16,7 @@ Conditions checked:
     4. Real edge % >= threshold (default 30%)
     5. Win rate >= minimum (default 35%)
     6. Sharpe ratio > threshold (default 0.3)
+    7. [Optional] Stress tests pass (--require-stress)
 
 Output: PASS/FAIL with detailed reasons
 """
@@ -52,6 +54,10 @@ class PromotionCriteria:
     strict_min_sharpe_ratio: float = 0.5
     strict_min_profit_factor: float = 1.2
 
+    # Stress test requirements (for LIVE eligibility)
+    require_stress_tests: bool = False
+    max_stress_degradation_pct: float = 50.0  # Max 50% PnL degradation under stress
+
 
 @dataclass
 class CheckResult:
@@ -64,12 +70,27 @@ class CheckResult:
 
 
 @dataclass
+class StressTestSummary:
+    """Summary of stress test results."""
+    ran: bool = False
+    all_passed: bool = False
+    key_scenarios_passed: bool = False
+    critical_failures: List[str] = None
+    recommendation: str = ""
+
+    def __post_init__(self):
+        if self.critical_failures is None:
+            self.critical_failures = []
+
+
+@dataclass
 class PromotionResult:
     """Overall promotion check result."""
     passed: bool
     checks: List[CheckResult]
     summary: str
     recommendation: str
+    stress_test_summary: Optional[StressTestSummary] = None
 
 
 def get_trading_stats(conn: sqlite3.Connection, days: int) -> dict:
@@ -178,7 +199,57 @@ def get_trading_stats(conn: sqlite3.Connection, days: int) -> dict:
     }
 
 
-def run_promotion_checks(stats: dict, criteria: PromotionCriteria, strict: bool = False) -> PromotionResult:
+def run_stress_tests(conn: sqlite3.Connection, days: int) -> StressTestSummary:
+    """
+    Run stress tests and return summary.
+
+    Returns StressTestSummary with pass/fail status for key scenarios.
+    """
+    try:
+        # Import stress test module
+        from tools.stress_test import (
+            run_all_stress_tests,
+            StressScenario
+        )
+
+        # Run key stress scenarios
+        key_scenarios = [
+            StressScenario.BASELINE,
+            StressScenario.FEE_PLUS_50,
+            StressScenario.SLIPPAGE_X1_5,
+            StressScenario.COMBINED_MILD
+        ]
+
+        result = run_all_stress_tests(conn, days, key_scenarios)
+
+        # Check if key scenarios passed
+        key_passed = all(
+            r.passed for r in result.results
+            if r.scenario in key_scenarios
+        )
+
+        return StressTestSummary(
+            ran=True,
+            all_passed=result.all_passed,
+            key_scenarios_passed=key_passed,
+            critical_failures=result.critical_failures,
+            recommendation=result.recommendation
+        )
+
+    except ImportError:
+        return StressTestSummary(
+            ran=False,
+            recommendation="Stress test module not available"
+        )
+    except Exception as e:
+        return StressTestSummary(
+            ran=False,
+            recommendation=f"Stress test error: {str(e)}"
+        )
+
+
+def run_promotion_checks(stats: dict, criteria: PromotionCriteria, strict: bool = False,
+                         stress_summary: StressTestSummary = None) -> PromotionResult:
     """Run all promotion checks against criteria."""
     checks = []
 
@@ -270,22 +341,54 @@ def run_promotion_checks(stats: dict, criteria: PromotionCriteria, strict: bool 
         message=f"Profit Factor: {stats['profit_factor']:.2f} (need >={min_pf})"
     ))
 
+    # Check 8: Stress Tests (if required and available)
+    stress_passed = True
+    if criteria.require_stress_tests and stress_summary:
+        if stress_summary.ran:
+            stress_passed = stress_summary.key_scenarios_passed
+            stress_msg = (
+                f"Key scenarios: {'PASS' if stress_passed else 'FAIL'}"
+                if stress_summary.ran else "Not run"
+            )
+            if stress_summary.critical_failures:
+                stress_msg += f" | Failures: {', '.join(stress_summary.critical_failures[:2])}"
+        else:
+            stress_passed = False
+            stress_msg = stress_summary.recommendation
+
+        checks.append(CheckResult(
+            name="Stress Tests",
+            passed=stress_passed,
+            actual_value=1 if stress_passed else 0,
+            threshold=1,
+            message=stress_msg
+        ))
+
     # Overall result
     all_passed = all(c.passed for c in checks)
     failed_checks = [c for c in checks if not c.passed]
 
     if all_passed:
         summary = "ALL CHECKS PASSED"
-        recommendation = "Strategy is ready for live promotion (with appropriate position sizing)"
+        if criteria.require_stress_tests and stress_summary and stress_summary.ran:
+            recommendation = "Strategy is ready for LIVE trading - passed performance and stress tests"
+        else:
+            recommendation = "Strategy is ready for live promotion (with appropriate position sizing)"
     else:
         summary = f"FAILED {len(failed_checks)}/{len(checks)} CHECKS"
-        recommendation = "Continue paper trading. Focus on: " + ", ".join(c.name for c in failed_checks)
+        failed_names = ", ".join(c.name for c in failed_checks)
+
+        if not stress_passed and criteria.require_stress_tests:
+            recommendation = f"NOT READY FOR LIVE - stress tests failed. Focus on: {failed_names}"
+        else:
+            recommendation = f"Continue paper trading. Focus on: {failed_names}"
 
     return PromotionResult(
         passed=all_passed,
         checks=checks,
         summary=summary,
-        recommendation=recommendation
+        recommendation=recommendation,
+        stress_test_summary=stress_summary
     )
 
 
@@ -330,6 +433,21 @@ def print_result(result: PromotionResult, stats: dict, days: int, strict: bool):
   {result.recommendation}
 """)
 
+    # Stress test summary
+    if result.stress_test_summary and result.stress_test_summary.ran:
+        stress = result.stress_test_summary
+        stress_icon = "+" if stress.key_scenarios_passed else "x"
+        print(f"""
+  --- STRESS TEST SUMMARY ---
+  [{stress_icon}] Key Scenarios: {'PASS' if stress.key_scenarios_passed else 'FAIL'}
+  [{stress_icon}] All Scenarios: {'PASS' if stress.all_passed else 'FAIL'}
+""")
+        if stress.critical_failures:
+            print("  Critical Failures:")
+            for failure in stress.critical_failures[:3]:
+                print(f"    - {failure}")
+        print()
+
     if result.passed:
         print("""
   ⚠ BEFORE GOING LIVE:
@@ -337,6 +455,12 @@ def print_result(result: PromotionResult, stats: dict, days: int, strict: bool):
   2. Monitor first 10 trades manually
   3. Set up runtime alarms (see hft_bot.py)
   4. Have a kill switch ready
+""")
+        if not (result.stress_test_summary and result.stress_test_summary.ran):
+            print("""
+  ⚠ STRESS TESTS NOT RUN:
+  Consider running: python tools/promotion_check.py --require-stress
+  LIVE trading requires passing stress tests!
 """)
 
 
@@ -354,6 +478,8 @@ Examples:
     parser.add_argument("--db", default="hft_trades.db", help="Database path")
     parser.add_argument("--days", type=int, default=7, help="Evaluation period (days)")
     parser.add_argument("--strict", action="store_true", help="Use strict criteria")
+    parser.add_argument("--require-stress", action="store_true",
+                        help="Require stress tests to pass for LIVE eligibility")
     parser.add_argument("--min-trades", type=int, help="Override minimum trade count")
     parser.add_argument("--max-drawdown", type=float, help="Override max drawdown threshold")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
@@ -393,9 +519,17 @@ Examples:
     if args.max_drawdown:
         criteria.max_drawdown_pct = args.max_drawdown
         criteria.strict_max_drawdown_pct = args.max_drawdown
+    if args.require_stress:
+        criteria.require_stress_tests = True
+
+    # Run stress tests if required
+    stress_summary = None
+    if args.require_stress:
+        print("Running stress tests...")
+        stress_summary = run_stress_tests(conn, args.days)
 
     # Run checks
-    result = run_promotion_checks(stats, criteria, args.strict)
+    result = run_promotion_checks(stats, criteria, args.strict, stress_summary)
 
     if args.json:
         import json
@@ -415,6 +549,14 @@ Examples:
                 for c in result.checks
             ]
         }
+        if result.stress_test_summary:
+            output["stress_tests"] = {
+                "ran": result.stress_test_summary.ran,
+                "all_passed": result.stress_test_summary.all_passed,
+                "key_scenarios_passed": result.stress_test_summary.key_scenarios_passed,
+                "critical_failures": result.stress_test_summary.critical_failures,
+                "recommendation": result.stress_test_summary.recommendation
+            }
         print(json.dumps(output, indent=2))
     else:
         print_result(result, stats, args.days, args.strict)

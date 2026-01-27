@@ -35,9 +35,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hft_system.research.walkforward import (
     WalkForwardEngine,
+    WalkForwardEngine3Way,
     ParameterGrid,
     walk_forward_run,
+    walk_forward_run_3way,
     WalkForwardResult,
+    WalkForwardResult3Way,
 )
 from hft_system.research.metrics import metrics_to_dict
 
@@ -189,6 +192,104 @@ def export_results_to_csv(result: WalkForwardResult, filepath: str):
     logger.info(f"Results exported to: {filepath}")
 
 
+def export_results_to_csv_3way(result: WalkForwardResult3Way, filepath: str):
+    """
+    Export 3-way walk-forward results to CSV.
+
+    Args:
+        result: WalkForwardResult3Way
+        filepath: Output CSV path
+    """
+    with open(filepath, 'w', newline='') as f:
+        writer = csv.writer(f)
+
+        # Header section
+        writer.writerow(["Walk-Forward Optimization Results (3-Way Split)"])
+        writer.writerow(["Symbol", result.symbol])
+        writer.writerow(["Period", f"{result.start_date.date()} to {result.end_date.date()}"])
+        writer.writerow(["Train Days", result.train_days])
+        writer.writerow(["Valid Days", result.valid_days])
+        writer.writerow(["Final Test Days", result.final_test_days])
+        writer.writerow(["Total Windows", result.total_windows])
+        writer.writerow([])
+
+        # Multiple comparisons warning
+        writer.writerow(["=== MULTIPLE COMPARISONS WARNING ==="])
+        writer.writerow(["Total Configs Tried", result.total_configs_tried])
+        writer.writerow(["Unique Configs", result.unique_configs])
+        writer.writerow(["Bonferroni Alpha", f"{result.bonferroni_alpha:.6f}"])
+        writer.writerow(["Warning", result.multiple_comparisons_warning])
+        writer.writerow([])
+
+        # VALIDATION metrics (used for selection)
+        writer.writerow(["=== VALIDATION METRICS (used for selection) ==="])
+        writer.writerow(["Metric", "Value"])
+        writer.writerow(["Total Trades", result.valid_trade_count])
+        writer.writerow(["Win Rate %", f"{result.valid_win_rate:.2f}"])
+        writer.writerow(["Total PnL %", f"{result.valid_total_pnl_pct:.4f}"])
+        writer.writerow(["Avg PnL %", f"{result.valid_avg_pnl_pct:.4f}"])
+        writer.writerow(["Max Drawdown %", f"{result.valid_max_drawdown_pct:.4f}"])
+        writer.writerow(["Sharpe Ratio", f"{result.valid_sharpe_ratio:.4f}"])
+        writer.writerow([])
+
+        # FINAL TEST metrics (unbiased - NOT used for selection)
+        writer.writerow(["=== FINAL TEST METRICS (UNBIASED - not used for selection) ==="])
+        writer.writerow(["Metric", "Value"])
+        writer.writerow(["Total Trades", result.final_test_trade_count])
+        writer.writerow(["Win Rate %", f"{result.final_test_win_rate:.2f}"])
+        writer.writerow(["Total PnL %", f"{result.final_test_total_pnl_pct:.4f}"])
+        writer.writerow(["Avg PnL %", f"{result.final_test_avg_pnl_pct:.4f}"])
+        writer.writerow(["Max Drawdown %", f"{result.final_test_max_drawdown_pct:.4f}"])
+        writer.writerow(["Sharpe Ratio", f"{result.final_test_sharpe_ratio:.4f}"])
+        writer.writerow([])
+
+        # Parameter frequency
+        writer.writerow(["=== BEST PARAMETERS FREQUENCY ==="])
+        writer.writerow(["Parameters", "Times Selected"])
+        for params, count in sorted(result.best_params_frequency.items(), key=lambda x: -x[1]):
+            writer.writerow([params, count])
+        writer.writerow([])
+
+        # Window details
+        writer.writerow(["=== WINDOW DETAILS ==="])
+        headers = [
+            "Window", "Train Start", "Train End", "Valid Start", "Valid End", "FT Start", "FT End",
+            "TP %", "SL %", "TS (s)", "Configs",
+            "Train Trades", "Train WR %", "Train PnL %",
+            "Valid Trades", "Valid WR %", "Valid PnL %",
+            "FT Trades", "FT WR %", "FT PnL %", "FT Sharpe"
+        ]
+        writer.writerow(headers)
+
+        for i, w in enumerate(result.window_results, 1):
+            row = [
+                i,
+                w.train_start.date(),
+                w.train_end.date(),
+                w.valid_start.date(),
+                w.valid_end.date(),
+                w.final_test_start.date(),
+                w.final_test_end.date(),
+                w.best_params.take_profit_pct,
+                w.best_params.stop_loss_pct,
+                w.best_params.time_stop_seconds,
+                w.configs_tried,
+                w.train_metrics.trade_count,
+                f"{w.train_metrics.win_rate:.1f}",
+                f"{w.train_metrics.avg_pnl_after_costs_pct:.4f}",
+                w.valid_metrics.trade_count,
+                f"{w.valid_metrics.win_rate:.1f}",
+                f"{w.valid_metrics.avg_pnl_after_costs_pct:.4f}",
+                w.final_test_metrics.trade_count,
+                f"{w.final_test_metrics.win_rate:.1f}",
+                f"{w.final_test_metrics.avg_pnl_after_costs_pct:.4f}",
+                f"{w.final_test_metrics.sharpe_ratio:.4f}"
+            ]
+            writer.writerow(row)
+
+    logger.info(f"Results exported to: {filepath}")
+
+
 def print_summary(result: WalkForwardResult):
     """Print summary to console."""
     print("\n" + "=" * 70)
@@ -234,22 +335,115 @@ def print_summary(result: WalkForwardResult):
     print("=" * 70)
 
 
+def print_summary_3way(result: WalkForwardResult3Way):
+    """Print summary for 3-way walk-forward to console."""
+    print("\n" + "=" * 80)
+    print(" WALK-FORWARD OPTIMIZATION RESULTS (3-WAY SPLIT)")
+    print("=" * 80)
+    print(f" Symbol: {result.symbol}")
+    print(f" Period: {result.start_date.date()} to {result.end_date.date()}")
+    print(f" Split:  TRAIN={result.train_days}d / VALID={result.valid_days}d / FINAL_TEST={result.final_test_days}d")
+    print(f" Windows: {result.total_windows}")
+    print()
+
+    # Multiple comparisons warning
+    print(" --- MULTIPLE COMPARISONS WARNING ---")
+    print(f" Configs Tested: {result.total_configs_tried} ({result.unique_configs} unique)")
+    print(f" Bonferroni Alpha: {result.bonferroni_alpha:.6f}")
+    print(f" {result.multiple_comparisons_warning}")
+    print()
+
+    # Validation metrics (used for selection)
+    print(" --- VALIDATION METRICS (used for param selection) ---")
+    print(f" Total Trades:    {result.valid_trade_count}")
+    print(f" Win Rate:        {result.valid_win_rate:.1f}%")
+    print(f" Total PnL:       {result.valid_total_pnl_pct:+.4f}%")
+    print(f" Avg PnL/Trade:   {result.valid_avg_pnl_pct:+.4f}%")
+    print(f" Max Drawdown:    {result.valid_max_drawdown_pct:.4f}%")
+    print(f" Sharpe Ratio:    {result.valid_sharpe_ratio:.4f}")
+    print()
+
+    # Final test metrics (unbiased)
+    print(" --- FINAL TEST METRICS (UNBIASED - not used for selection) ---")
+    print(f" Total Trades:    {result.final_test_trade_count}")
+    print(f" Win Rate:        {result.final_test_win_rate:.1f}%")
+    print(f" Total PnL:       {result.final_test_total_pnl_pct:+.4f}%")
+    print(f" Avg PnL/Trade:   {result.final_test_avg_pnl_pct:+.4f}%")
+    print(f" Max Drawdown:    {result.final_test_max_drawdown_pct:.4f}%")
+    print(f" Sharpe Ratio:    {result.final_test_sharpe_ratio:.4f}")
+    print()
+
+    print(" --- BEST PARAMETERS (most frequently selected) ---")
+    sorted_params = sorted(result.best_params_frequency.items(), key=lambda x: -x[1])
+    for i, (params, count) in enumerate(sorted_params[:5], 1):
+        pct = count / result.total_windows * 100
+        print(f" {i}. {params}")
+        print(f"    Selected: {count}/{result.total_windows} times ({pct:.0f}%)")
+    print()
+
+    # Evaluation
+    print(" --- EVALUATION ---")
+
+    # Compare validation vs final test (detect overfitting)
+    valid_pnl = result.valid_avg_pnl_pct
+    final_pnl = result.final_test_avg_pnl_pct
+
+    if valid_pnl > 0 and final_pnl > 0:
+        degradation = (valid_pnl - final_pnl) / valid_pnl * 100 if valid_pnl != 0 else 0
+        print(f" Valid PnL: {valid_pnl:+.4f}% -> Final Test PnL: {final_pnl:+.4f}%")
+        if degradation > 50:
+            print(f" WARNING: {degradation:.0f}% degradation from validation to final test!")
+            print(f"          This suggests OVERFITTING to validation data.")
+        elif degradation > 20:
+            print(f" CAUTION: {degradation:.0f}% degradation - some overfitting possible.")
+        else:
+            print(f" GOOD: Only {degradation:.0f}% degradation - results appear robust.")
+    elif final_pnl > 0:
+        print(f" Positive Final Test PnL: Strategy shows promise")
+        if result.final_test_sharpe_ratio > 0.5:
+            print(f" Good Final Test Sharpe (>{0.5}): Risk-adjusted returns reasonable")
+        else:
+            print(f" Low Final Test Sharpe (<0.5): High variance in returns")
+    else:
+        print(f" Negative Final Test PnL: Strategy needs improvement")
+
+    if result.final_test_max_drawdown_pct > 5:
+        print(f" WARNING: Final test max drawdown {result.final_test_max_drawdown_pct:.1f}% is high")
+
+    print("=" * 80)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Walk-Forward Backtest with Parameter Sweep",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # 2-way split (legacy)
   python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-02-01
-  python tools/walkforward_run.py --symbol BTCUSDT --start 2024-01-01 --end 2024-03-01 --train-days 21 --test-days 7
-  python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-02-01 --grid "tp=0.2,0.3; sl=0.1,0.15; tstop=60,90"
+
+  # 3-way split (recommended - prevents overfitting)
+  python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-03-01 --3way
+
+  # Custom split sizes
+  python tools/walkforward_run.py --symbol BTCUSDT --start 2024-01-01 --end 2024-03-01 \\
+      --3way --train-days 21 --valid-days 7 --final-test-days 7
+
+  # Custom parameter grid
+  python tools/walkforward_run.py --symbol XRPUSDT --start 2024-01-01 --end 2024-02-01 \\
+      --grid "tp=0.2,0.3; sl=0.1,0.15; tstop=60,90"
         """
     )
     parser.add_argument("--symbol", required=True, help="Trading symbol (e.g., XRPUSDT)")
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
+    parser.add_argument("--3way", dest="three_way", action="store_true",
+                        help="Use 3-way split (TRAIN/VALID/FINAL_TEST) to prevent overfitting")
     parser.add_argument("--train-days", type=int, default=14, help="Training window days (default: 14)")
-    parser.add_argument("--test-days", type=int, default=7, help="Test window days (default: 7)")
+    parser.add_argument("--test-days", type=int, default=7, help="Test window days (default: 7, used for 2-way)")
+    parser.add_argument("--valid-days", type=int, default=7, help="Validation window days (default: 7, used for 3-way)")
+    parser.add_argument("--final-test-days", type=int, default=7, help="Final test window days (default: 7, used for 3-way)")
+    parser.add_argument("--top-n-validate", type=int, default=5, help="Top N candidates to validate (default: 5, used for 3-way)")
     parser.add_argument("--grid", type=str, help="Parameter grid (e.g., 'tp=0.2,0.3,0.4; sl=0.1,0.15; tstop=30,60')")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--output-dir", default="reports", help="Output directory for CSV (default: reports)")
@@ -280,13 +474,21 @@ Examples:
             min_imbalance=[0.60]
         )
 
+    if args.three_way:
+        split_info = f"TRAIN={args.train_days}d / VALID={args.valid_days}d / FINAL_TEST={args.final_test_days}d"
+        mode_label = "3-WAY SPLIT (prevents overfitting)"
+    else:
+        split_info = f"TRAIN={args.train_days}d / TEST={args.test_days}d"
+        mode_label = "2-WAY SPLIT (legacy)"
+
     print(f"""
 +======================================================================+
 |              WALK-FORWARD OPTIMIZATION                               |
 +======================================================================+
 | Symbol:       {args.symbol:<52} |
 | Period:       {start_date.date()} to {end_date.date():<40} |
-| Train/Test:   {args.train_days}/{args.test_days} days{' ' * 49}|
+| Mode:         {mode_label:<52} |
+| Split:        {split_info:<52} |
 | Grid Size:    {param_grid.total_combinations()} parameter combinations{' ' * 32}|
 | Random Seed:  {args.seed:<52} |
 +======================================================================+
@@ -301,28 +503,50 @@ Examples:
 
     # Run walk-forward
     try:
-        result = walk_forward_run(
-            symbol=args.symbol,
-            candles=candles,
-            start_date=start_date,
-            end_date=end_date,
-            train_days=args.train_days,
-            test_days=args.test_days,
-            param_grid=param_grid,
-            random_seed=args.seed
-        )
+        if args.three_way:
+            result = walk_forward_run_3way(
+                symbol=args.symbol,
+                candles=candles,
+                start_date=start_date,
+                end_date=end_date,
+                train_days=args.train_days,
+                valid_days=args.valid_days,
+                final_test_days=args.final_test_days,
+                param_grid=param_grid,
+                random_seed=args.seed,
+                top_n_validate=args.top_n_validate
+            )
+        else:
+            result = walk_forward_run(
+                symbol=args.symbol,
+                candles=candles,
+                start_date=start_date,
+                end_date=end_date,
+                train_days=args.train_days,
+                test_days=args.test_days,
+                param_grid=param_grid,
+                random_seed=args.seed
+            )
     except Exception as e:
         logger.error(f"Walk-forward failed: {e}")
         return 1
 
     # Print summary
-    print_summary(result)
+    if args.three_way:
+        print_summary_3way(result)
+    else:
+        print_summary(result)
 
     # Export to CSV
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = Path(args.output_dir) / f"walkforward_{args.symbol}_{timestamp}.csv"
-    export_results_to_csv(result, str(csv_path))
+
+    if args.three_way:
+        csv_path = Path(args.output_dir) / f"walkforward_3way_{args.symbol}_{timestamp}.csv"
+        export_results_to_csv_3way(result, str(csv_path))
+    else:
+        csv_path = Path(args.output_dir) / f"walkforward_{args.symbol}_{timestamp}.csv"
+        export_results_to_csv(result, str(csv_path))
 
     print(f"\n CSV Report: {csv_path}")
     print()

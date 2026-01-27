@@ -569,6 +569,61 @@ class TradeLogger:
             )
         """)
 
+        # PART 7: Maker order telemetry - track maker order fill behavior
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS maker_order_telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT UNIQUE NOT NULL,
+                trade_id TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+
+                -- Order details
+                limit_price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                order_type TEXT DEFAULT 'limit',
+
+                -- Timing telemetry
+                posted_ts INTEGER NOT NULL,
+                filled_ts INTEGER,
+                cancelled_ts INTEGER,
+                time_to_fill_ms INTEGER,
+
+                -- Fill telemetry
+                fill_ratio REAL DEFAULT 0,
+                filled_quantity REAL DEFAULT 0,
+                avg_fill_price REAL,
+                slippage_from_limit_pct REAL,
+
+                -- Market context at post time
+                best_bid_at_post REAL,
+                best_ask_at_post REAL,
+                spread_at_post_pct REAL,
+                mid_price_at_post REAL,
+                queue_position_estimate INTEGER,
+
+                -- Market context at fill/cancel time
+                best_bid_at_fill REAL,
+                best_ask_at_fill REAL,
+                spread_at_fill_pct REAL,
+                price_moved_pct REAL,
+
+                -- Cancel reason (if cancelled)
+                cancel_reason TEXT,
+
+                -- Fill model validation
+                price_crossed_limit INTEGER DEFAULT 0,
+                cross_depth_bps REAL,
+                would_fill_conservative INTEGER DEFAULT 0,
+
+                -- Outcome tracking
+                status TEXT DEFAULT 'pending',
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (trade_id) REFERENCES trades(trade_id)
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
@@ -602,6 +657,13 @@ class TradeLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_winner_gate_blocks_timestamp ON winner_gate_blocks(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_winner_gate_blocks_symbol ON winner_gate_blocks(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_winner_gate_blocks_reason ON winner_gate_blocks(block_reason)")
+
+        # Maker order telemetry indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_maker_order_order_id ON maker_order_telemetry(order_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_maker_order_trade_id ON maker_order_telemetry(trade_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_maker_order_symbol ON maker_order_telemetry(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_maker_order_status ON maker_order_telemetry(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_maker_order_posted_ts ON maker_order_telemetry(posted_ts)")
 
         self.conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
@@ -2262,6 +2324,361 @@ class TradeLogger:
             }
         except Exception as e:
             logger.error(f"Error getting position sizing stats: {e}")
+            return {"error": str(e)}
+
+    def log_maker_order_posted(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        limit_price: float,
+        quantity: float,
+        market_data: dict,
+        trade_id: str = None
+    ):
+        """
+        PART 7: Log maker order when posted.
+
+        Records initial order state for fill analysis:
+        - Limit price relative to market
+        - Spread at post time
+        - Queue position estimate
+        """
+        try:
+            best_bid = market_data.get("best_bid", 0)
+            best_ask = market_data.get("best_ask", 0)
+            mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+            spread_pct = ((best_ask - best_bid) / mid_price * 100) if mid_price > 0 else 0
+
+            # Estimate queue position (simplified - would need depth data)
+            queue_position = market_data.get("queue_position_estimate", 0)
+
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO maker_order_telemetry (
+                    order_id, trade_id, symbol, side,
+                    limit_price, quantity, order_type,
+                    posted_ts,
+                    best_bid_at_post, best_ask_at_post, spread_at_post_pct,
+                    mid_price_at_post, queue_position_estimate,
+                    status
+                ) VALUES (?, ?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, 'pending')
+            """, (
+                order_id,
+                trade_id,
+                symbol,
+                side,
+                limit_price,
+                quantity,
+                int(time.time() * 1000),
+                best_bid,
+                best_ask,
+                round(spread_pct, 4),
+                mid_price,
+                queue_position
+            ))
+            self.conn.commit()
+            logger.debug(f"Maker order posted: {order_id} @ {limit_price}")
+        except Exception as e:
+            pass  # Silently ignore database lock errors
+
+    def log_maker_order_filled(
+        self,
+        order_id: str,
+        filled_quantity: float,
+        avg_fill_price: float,
+        market_data: dict,
+        price_crossed_limit: bool = False,
+        cross_depth_bps: float = 0
+    ):
+        """
+        PART 7: Log maker order fill.
+
+        Records:
+        - Time to fill
+        - Fill ratio
+        - Price movement during order life
+        - Whether price crossed limit (for conservative fill model validation)
+        """
+        try:
+            filled_ts = int(time.time() * 1000)
+            best_bid = market_data.get("best_bid", 0)
+            best_ask = market_data.get("best_ask", 0)
+            spread_pct = 0
+            if best_bid and best_ask:
+                mid = (best_bid + best_ask) / 2
+                spread_pct = (best_ask - best_bid) / mid * 100 if mid > 0 else 0
+
+            cursor = self.conn.cursor()
+
+            # Get original order details
+            cursor.execute("""
+                SELECT posted_ts, limit_price, quantity, mid_price_at_post
+                FROM maker_order_telemetry
+                WHERE order_id = ?
+            """, (order_id,))
+            row = cursor.fetchone()
+
+            if not row:
+                logger.warning(f"Maker order not found: {order_id}")
+                return
+
+            posted_ts, limit_price, quantity, mid_at_post = row
+            time_to_fill_ms = filled_ts - posted_ts
+            fill_ratio = filled_quantity / quantity if quantity > 0 else 0
+            slippage = ((avg_fill_price - limit_price) / limit_price * 100) if limit_price > 0 else 0
+
+            # Price movement since post
+            current_mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+            price_moved_pct = ((current_mid - mid_at_post) / mid_at_post * 100) if mid_at_post > 0 else 0
+
+            # Update order record
+            cursor.execute("""
+                UPDATE maker_order_telemetry SET
+                    filled_ts = ?,
+                    time_to_fill_ms = ?,
+                    fill_ratio = ?,
+                    filled_quantity = ?,
+                    avg_fill_price = ?,
+                    slippage_from_limit_pct = ?,
+                    best_bid_at_fill = ?,
+                    best_ask_at_fill = ?,
+                    spread_at_fill_pct = ?,
+                    price_moved_pct = ?,
+                    price_crossed_limit = ?,
+                    cross_depth_bps = ?,
+                    status = ?
+                WHERE order_id = ?
+            """, (
+                filled_ts,
+                time_to_fill_ms,
+                round(fill_ratio, 4),
+                filled_quantity,
+                avg_fill_price,
+                round(slippage, 6),
+                best_bid,
+                best_ask,
+                round(spread_pct, 4),
+                round(price_moved_pct, 4),
+                1 if price_crossed_limit else 0,
+                round(cross_depth_bps, 2),
+                'filled' if fill_ratio >= 0.99 else 'partial',
+                order_id
+            ))
+            self.conn.commit()
+            logger.debug(f"Maker order filled: {order_id} | {fill_ratio*100:.0f}% in {time_to_fill_ms}ms")
+        except Exception as e:
+            pass  # Silently ignore database lock errors
+
+    def log_maker_order_cancelled(
+        self,
+        order_id: str,
+        cancel_reason: str,
+        market_data: dict
+    ):
+        """
+        PART 7: Log maker order cancellation.
+
+        Cancel reasons:
+        - timeout: Order didn't fill within time limit
+        - price_moved: Market moved away from limit
+        - signal_invalid: Original signal invalidated
+        - manual: Manual cancellation
+        """
+        try:
+            cancelled_ts = int(time.time() * 1000)
+            best_bid = market_data.get("best_bid", 0)
+            best_ask = market_data.get("best_ask", 0)
+            spread_pct = 0
+            if best_bid and best_ask:
+                mid = (best_bid + best_ask) / 2
+                spread_pct = (best_ask - best_bid) / mid * 100 if mid > 0 else 0
+
+            cursor = self.conn.cursor()
+
+            # Get original order details
+            cursor.execute("""
+                SELECT posted_ts, mid_price_at_post
+                FROM maker_order_telemetry
+                WHERE order_id = ?
+            """, (order_id,))
+            row = cursor.fetchone()
+
+            if not row:
+                return
+
+            posted_ts, mid_at_post = row
+            time_alive_ms = cancelled_ts - posted_ts
+
+            # Price movement since post
+            current_mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+            price_moved_pct = ((current_mid - mid_at_post) / mid_at_post * 100) if mid_at_post > 0 else 0
+
+            cursor.execute("""
+                UPDATE maker_order_telemetry SET
+                    cancelled_ts = ?,
+                    time_to_fill_ms = ?,
+                    best_bid_at_fill = ?,
+                    best_ask_at_fill = ?,
+                    spread_at_fill_pct = ?,
+                    price_moved_pct = ?,
+                    cancel_reason = ?,
+                    status = 'cancelled'
+                WHERE order_id = ?
+            """, (
+                cancelled_ts,
+                time_alive_ms,
+                best_bid,
+                best_ask,
+                round(spread_pct, 4),
+                round(price_moved_pct, 4),
+                cancel_reason,
+                order_id
+            ))
+            self.conn.commit()
+            logger.debug(f"Maker order cancelled: {order_id} | reason={cancel_reason}")
+        except Exception as e:
+            pass  # Silently ignore database lock errors
+
+    def update_maker_fill_model_validation(
+        self,
+        order_id: str,
+        would_fill_conservative: bool
+    ):
+        """
+        PART 7: Update whether this order would have filled under conservative model.
+
+        Used for backtesting fill model accuracy.
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE maker_order_telemetry SET
+                    would_fill_conservative = ?
+                WHERE order_id = ?
+            """, (1 if would_fill_conservative else 0, order_id))
+            self.conn.commit()
+        except Exception as e:
+            pass
+
+    def get_maker_fill_stats(self, days: int = 7) -> dict:
+        """
+        PART 7: Get maker order fill statistics.
+
+        Returns:
+        - Fill rate (% of orders fully filled)
+        - Average time to fill
+        - Cancel rate and reasons
+        - Fill model accuracy (conservative vs actual)
+        """
+        try:
+            cursor = self.conn.cursor()
+            cutoff_ms = int((time.time() - days * 86400) * 1000)
+
+            # Overall stats
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total_orders,
+                    SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as filled,
+                    SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END) as partial,
+                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled,
+                    AVG(CASE WHEN status IN ('filled', 'partial') THEN time_to_fill_ms ELSE NULL END) as avg_time_to_fill,
+                    AVG(CASE WHEN status IN ('filled', 'partial') THEN fill_ratio ELSE NULL END) as avg_fill_ratio,
+                    AVG(CASE WHEN status IN ('filled', 'partial') THEN slippage_from_limit_pct ELSE NULL END) as avg_slippage
+                FROM maker_order_telemetry
+                WHERE posted_ts > ?
+            """, (cutoff_ms,))
+            row = cursor.fetchone()
+
+            if not row or row[0] == 0:
+                return {"message": "No maker order data"}
+
+            total = row[0]
+            filled = row[1] or 0
+            partial = row[2] or 0
+            cancelled = row[3] or 0
+            fill_rate = ((filled + partial) / total * 100) if total > 0 else 0
+
+            # Cancel reason breakdown
+            cursor.execute("""
+                SELECT cancel_reason, COUNT(*) as count
+                FROM maker_order_telemetry
+                WHERE posted_ts > ? AND status = 'cancelled'
+                GROUP BY cancel_reason
+                ORDER BY count DESC
+            """, (cutoff_ms,))
+            cancel_reasons = {r[0]: r[1] for r in cursor.fetchall()}
+
+            # Conservative fill model validation
+            cursor.execute("""
+                SELECT
+                    SUM(CASE WHEN status = 'filled' AND would_fill_conservative = 1 THEN 1 ELSE 0 END) as conservative_correct_fill,
+                    SUM(CASE WHEN status = 'filled' AND would_fill_conservative = 0 THEN 1 ELSE 0 END) as conservative_missed,
+                    SUM(CASE WHEN status IN ('cancelled', 'partial') AND would_fill_conservative = 1 THEN 1 ELSE 0 END) as conservative_false_positive,
+                    SUM(CASE WHEN status IN ('cancelled', 'partial') AND would_fill_conservative = 0 THEN 1 ELSE 0 END) as conservative_correct_reject
+                FROM maker_order_telemetry
+                WHERE posted_ts > ?
+            """, (cutoff_ms,))
+            fill_model_row = cursor.fetchone()
+
+            # Price cross stats
+            cursor.execute("""
+                SELECT
+                    AVG(CASE WHEN price_crossed_limit = 1 THEN cross_depth_bps ELSE NULL END) as avg_cross_depth,
+                    SUM(CASE WHEN price_crossed_limit = 1 AND status = 'filled' THEN 1 ELSE 0 END) as filled_with_cross,
+                    SUM(CASE WHEN price_crossed_limit = 0 AND status = 'filled' THEN 1 ELSE 0 END) as filled_no_cross
+                FROM maker_order_telemetry
+                WHERE posted_ts > ?
+            """, (cutoff_ms,))
+            cross_row = cursor.fetchone()
+
+            # Per-symbol breakdown
+            cursor.execute("""
+                SELECT
+                    symbol,
+                    COUNT(*) as orders,
+                    AVG(fill_ratio) as avg_fill_ratio,
+                    AVG(time_to_fill_ms) as avg_time_ms
+                FROM maker_order_telemetry
+                WHERE posted_ts > ? AND status != 'pending'
+                GROUP BY symbol
+                ORDER BY orders DESC
+            """, (cutoff_ms,))
+            symbol_breakdown = {
+                r[0]: {
+                    "orders": r[1],
+                    "avg_fill_ratio": round(r[2], 3) if r[2] else 0,
+                    "avg_time_ms": round(r[3], 0) if r[3] else 0
+                }
+                for r in cursor.fetchall()
+            }
+
+            return {
+                "period_days": days,
+                "total_orders": total,
+                "filled": filled,
+                "partial": partial,
+                "cancelled": cancelled,
+                "fill_rate_pct": round(fill_rate, 1),
+                "avg_time_to_fill_ms": round(row[4], 0) if row[4] else 0,
+                "avg_fill_ratio": round(row[5], 3) if row[5] else 0,
+                "avg_slippage_pct": round(row[6], 4) if row[6] else 0,
+                "cancel_reasons": cancel_reasons,
+                "fill_model_validation": {
+                    "conservative_correct_fill": fill_model_row[0] or 0,
+                    "conservative_missed": fill_model_row[1] or 0,
+                    "conservative_false_positive": fill_model_row[2] or 0,
+                    "conservative_correct_reject": fill_model_row[3] or 0
+                },
+                "price_cross_stats": {
+                    "avg_cross_depth_bps": round(cross_row[0], 2) if cross_row[0] else 0,
+                    "filled_with_cross": cross_row[1] or 0,
+                    "filled_no_cross": cross_row[2] or 0
+                },
+                "symbol_breakdown": symbol_breakdown
+            }
+        except Exception as e:
+            logger.error(f"Error getting maker fill stats: {e}")
             return {"error": str(e)}
 
     def close(self):
