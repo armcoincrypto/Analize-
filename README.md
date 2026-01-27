@@ -163,6 +163,40 @@ python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30 \
     --from-best reports/walkforward_3way_XRPUSDT_*.csv
 ```
 
+### Auto Strategy Discovery (Orchestrator)
+
+```bash
+# Basic discovery run
+python tools/auto_discover.py --symbol XRPUSDT --start 2025-01-01 --end 2025-01-27
+
+# With custom parameters and stress test requirement
+python tools/auto_discover.py --symbol XRPUSDT --start 2025-01-01 --end 2025-01-27 \
+    --train-days 14 --valid-days 7 --final-days 7 \
+    --grid "tp=0.12,0.16,0.20; sl=0.08,0.10,0.12; tstop=30,60" \
+    --top-k 5 --require-stress
+
+# Dry run (no registry update)
+python tools/auto_discover.py --symbol XRPUSDT --start 2025-01-01 --end 2025-01-27 --dry-run
+```
+
+**Workflow:**
+1. Run walk-forward 3-way optimization
+2. Select top-k candidates by validation metrics
+3. Filter by positive final test PnL
+4. Run stress tests on survivors
+5. Pick best candidate as challenger
+6. Update registry and generate config
+
+### Maker Telemetry Smoke Test
+
+```bash
+# Check maker order telemetry
+python tools/maker_telemetry_smoke.py --db hft_trades.db --days 7
+
+# Filter by symbol
+python tools/maker_telemetry_smoke.py --db hft_trades.db --symbol XRPUSDT
+```
+
 ### Common Options
 
 | Option | Description |
@@ -173,6 +207,8 @@ python tools/stress_test.py --db hft_trades.db --symbol XRP --days 30 \
 | `--json` | Output as JSON |
 | `--final-days` | Alias for --final-test-days (walkforward) |
 | `--from-best` | Load params from CSV (stress_test) |
+| `--debug` | Enable debug output (stress_test) |
+| `--dry-run` | Preview without changes (auto_discover) |
 
 ## API Endpoints
 
