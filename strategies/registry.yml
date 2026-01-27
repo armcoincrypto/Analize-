@@ -1,0 +1,296 @@
+# Strategy Registry
+# =================
+# Central registry for all strategy configurations.
+# Each strategy is versioned and tracked with metadata.
+#
+# Schema:
+#   - strategy_id: unique identifier (e.g., "xrp_momentum_v1")
+#   - symbol: trading pair
+#   - status: active | champion | challenger | retired | testing
+#   - regimes_allowed: list of market regimes where strategy operates
+#   - causes: enabled/disabled cause signals
+#   - params: tp/sl/tstop parameters
+#   - execution: taker/maker/auto policy with thresholds
+#   - risk: position sizing and loss limits
+#   - metadata: versioning and validation info
+
+version: "1.0"
+updated_at: "2026-01-27T00:00:00Z"
+
+# =============================================================================
+# STRATEGIES
+# =============================================================================
+
+strategies:
+
+  # ---------------------------------------------------------------------------
+  # XRP Momentum Strategy v1 (CHAMPION)
+  # ---------------------------------------------------------------------------
+  xrp_momentum_v1:
+    symbol: XRPUSDT
+    status: champion
+    description: "XRP momentum strategy with CVD and OB imbalance signals"
+
+    # Market regimes where this strategy is allowed to trade
+    regimes_allowed:
+      - high_vol_trend
+      - mean_reversion
+    regimes_blocked:
+      - low_vol_chop
+      - liquidity_vacuum
+      - news_spike
+
+    # Cause signal configuration
+    causes:
+      enabled:
+        - ob_bullish_imbalance
+        - ob_bearish_imbalance
+        - cvd_buy_pressure
+        - cvd_sell_pressure
+        - price_momentum_up
+        - price_momentum_down
+      disabled:
+        - btc_bullish
+        - btc_bearish
+      # Cause class policy: FULL (1.0x), PROBE (0.10x), BLOCK (0x)
+      probe_causes:
+        - unknown
+      block_causes: []
+
+    # Strategy parameters
+    params:
+      take_profit_pct: 0.20
+      stop_loss_pct: 0.15
+      time_stop_seconds: 90
+      min_conditions: 3
+      min_imbalance: 0.60
+      min_confidence: 0.6
+
+    # Execution policy
+    execution:
+      mode: auto  # taker | maker | auto
+      auto_maker_spread_threshold_bps: 2.0  # Use maker if spread <= 2 bps
+      max_spread_bps: 5.0  # Block trades if spread > 5 bps
+      maker_timeout_ms: 5000  # Cancel maker order after 5s
+      maker_price_offset_bps: 0.5  # Place limit 0.5 bps inside spread
+
+    # Risk limits
+    risk:
+      position_size_pct: 1.0  # 1% of capital per trade
+      max_positions: 1  # Max concurrent positions
+      max_daily_trades: 50
+      max_daily_loss_pct: 2.0  # Stop trading after 2% daily loss
+      max_drawdown_pct: 5.0  # Hard stop at 5% drawdown
+      loss_streak_pause_trades: 5  # Pause after 5 consecutive losses
+      loss_streak_pause_minutes: 30
+
+    # Validation metadata
+    metadata:
+      created_at: "2026-01-20T10:00:00Z"
+      updated_at: "2026-01-27T00:00:00Z"
+      commit_hash: "71fc010"
+      walkforward_run_id: "wf_xrp_20260125_143022"
+      final_test_pnl_pct: 0.85
+      final_test_sharpe: 0.62
+      final_test_win_rate: 48.5
+      final_test_trades: 127
+      stress_test_passed: true
+      stress_test_date: "2026-01-25"
+      promotion_approved: true
+      promotion_date: "2026-01-26"
+      notes: "Passed all stress tests. Ready for live with 0.5% position size."
+
+  # ---------------------------------------------------------------------------
+  # XRP Momentum Strategy v2 (CHALLENGER)
+  # ---------------------------------------------------------------------------
+  xrp_momentum_v2:
+    symbol: XRPUSDT
+    status: challenger
+    description: "XRP momentum v2 with tighter stops and maker-first execution"
+
+    regimes_allowed:
+      - high_vol_trend
+      - mean_reversion
+    regimes_blocked:
+      - low_vol_chop
+      - liquidity_vacuum
+      - news_spike
+
+    causes:
+      enabled:
+        - ob_bullish_imbalance
+        - ob_bearish_imbalance
+        - cvd_buy_pressure
+        - cvd_sell_pressure
+        - price_momentum_up
+        - price_momentum_down
+      disabled:
+        - btc_bullish
+        - btc_bearish
+      probe_causes:
+        - unknown
+      block_causes: []
+
+    params:
+      take_profit_pct: 0.18
+      stop_loss_pct: 0.12
+      time_stop_seconds: 75
+      min_conditions: 3
+      min_imbalance: 0.62
+      min_confidence: 0.65
+
+    execution:
+      mode: maker  # Prioritize maker for lower fees
+      auto_maker_spread_threshold_bps: 3.0
+      max_spread_bps: 4.0
+      maker_timeout_ms: 3000
+      maker_price_offset_bps: 0.3
+
+    risk:
+      position_size_pct: 0.8
+      max_positions: 1
+      max_daily_trades: 60
+      max_daily_loss_pct: 1.5
+      max_drawdown_pct: 4.0
+      loss_streak_pause_trades: 4
+      loss_streak_pause_minutes: 20
+
+    metadata:
+      created_at: "2026-01-26T14:00:00Z"
+      updated_at: "2026-01-27T00:00:00Z"
+      commit_hash: "71fc010"
+      walkforward_run_id: "wf_xrp_20260126_140000"
+      final_test_pnl_pct: 0.92
+      final_test_sharpe: 0.71
+      final_test_win_rate: 51.2
+      final_test_trades: 143
+      stress_test_passed: true
+      stress_test_date: "2026-01-26"
+      promotion_approved: false
+      promotion_date: null
+      notes: "Challenger for champion v1. Better backtest metrics, needs live validation."
+
+  # ---------------------------------------------------------------------------
+  # BTC Scalp Strategy v1 (TESTING)
+  # ---------------------------------------------------------------------------
+  btc_scalp_v1:
+    symbol: BTCUSDT
+    status: testing
+    description: "BTC scalping strategy for high-volume periods"
+
+    regimes_allowed:
+      - high_vol_trend
+    regimes_blocked:
+      - low_vol_chop
+      - mean_reversion
+      - liquidity_vacuum
+      - news_spike
+
+    causes:
+      enabled:
+        - ob_bullish_imbalance
+        - ob_bearish_imbalance
+        - cvd_buy_pressure
+        - cvd_sell_pressure
+      disabled:
+        - price_momentum_up
+        - price_momentum_down
+        - btc_bullish
+        - btc_bearish
+      probe_causes:
+        - price_momentum_up
+        - price_momentum_down
+      block_causes: []
+
+    params:
+      take_profit_pct: 0.10
+      stop_loss_pct: 0.08
+      time_stop_seconds: 45
+      min_conditions: 4
+      min_imbalance: 0.65
+      min_confidence: 0.7
+
+    execution:
+      mode: taker  # Fast execution for BTC scalps
+      auto_maker_spread_threshold_bps: 1.0
+      max_spread_bps: 3.0
+      maker_timeout_ms: 2000
+      maker_price_offset_bps: 0.2
+
+    risk:
+      position_size_pct: 0.5
+      max_positions: 1
+      max_daily_trades: 30
+      max_daily_loss_pct: 1.0
+      max_drawdown_pct: 3.0
+      loss_streak_pause_trades: 3
+      loss_streak_pause_minutes: 60
+
+    metadata:
+      created_at: "2026-01-27T00:00:00Z"
+      updated_at: "2026-01-27T00:00:00Z"
+      commit_hash: "71fc010"
+      walkforward_run_id: null
+      final_test_pnl_pct: null
+      final_test_sharpe: null
+      final_test_win_rate: null
+      final_test_trades: null
+      stress_test_passed: false
+      stress_test_date: null
+      promotion_approved: false
+      promotion_date: null
+      notes: "New strategy in testing phase. Needs walk-forward validation."
+
+
+# =============================================================================
+# CHAMPION/CHALLENGER ASSIGNMENTS
+# =============================================================================
+# Maps symbols to their current champion and challenger strategies
+
+assignments:
+  XRPUSDT:
+    champion: xrp_momentum_v1
+    challenger: xrp_momentum_v2
+    last_comparison: "2026-01-27T00:00:00Z"
+    comparison_days: 7
+
+  BTCUSDT:
+    champion: null
+    challenger: btc_scalp_v1
+    last_comparison: null
+    comparison_days: 7
+
+
+# =============================================================================
+# GLOBAL DEFAULTS
+# =============================================================================
+# Default values applied when strategy doesn't specify
+
+defaults:
+  regimes_allowed:
+    - high_vol_trend
+    - mean_reversion
+
+  params:
+    take_profit_pct: 0.15
+    stop_loss_pct: 0.10
+    time_stop_seconds: 90
+    min_conditions: 3
+    min_imbalance: 0.60
+    min_confidence: 0.6
+
+  execution:
+    mode: taker
+    auto_maker_spread_threshold_bps: 2.0
+    max_spread_bps: 5.0
+    maker_timeout_ms: 5000
+    maker_price_offset_bps: 0.5
+
+  risk:
+    position_size_pct: 1.0
+    max_positions: 1
+    max_daily_trades: 50
+    max_daily_loss_pct: 2.0
+    max_drawdown_pct: 5.0
+    loss_streak_pause_trades: 5
+    loss_streak_pause_minutes: 30

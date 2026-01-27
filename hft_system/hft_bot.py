@@ -43,6 +43,7 @@ from .risk_controller import RiskController, ConfidenceTier, ConfidenceScore
 from .execution_engine import ExecutionEngine
 from .trade_logger import TradeLogger
 from .db_migrations import ensure_schema
+from .strategy_loader import StrategyLoader, StrategyConfig, apply_strategy_to_runtime
 
 # Setup logging
 logging.basicConfig(
@@ -1456,14 +1457,97 @@ class HFTBot:
         logger.info("HFT bot stopped")
 
 
+def load_strategy_file(strategy_path: str) -> dict:
+    """
+    Load and apply strategy from file.
+
+    Args:
+        strategy_path: Path to generated strategy YAML/JSON file
+
+    Returns:
+        Dict of config changes applied
+    """
+    import os
+    from pathlib import Path
+
+    # Also check environment variable
+    if not strategy_path:
+        strategy_path = os.environ.get("HFT_STRATEGY_FILE")
+
+    if not strategy_path:
+        return {}
+
+    path = Path(strategy_path)
+    if not path.exists():
+        logger.warning(f"Strategy file not found: {strategy_path}")
+        return {}
+
+    try:
+        loader = StrategyLoader()
+        strategy = loader.load_config_file(str(path))
+
+        if not strategy:
+            logger.warning(f"Could not load strategy from: {strategy_path}")
+            return {}
+
+        # Validate strategy
+        errors = loader.validate_strategy(strategy)
+        if errors:
+            logger.warning(f"Strategy validation warnings: {', '.join(errors)}")
+
+        # Apply to runtime config
+        changes = apply_strategy_to_runtime(strategy, SYSTEM_CONFIG, COST_MODEL)
+
+        logger.info(f"Loaded strategy: {strategy.strategy_id} ({strategy.symbol})")
+        logger.info(f"  Status: {strategy.status}")
+        logger.info(f"  Applied {len(changes)} config overrides")
+
+        for param, (old, new) in changes.items():
+            logger.info(f"    {param}: {old} -> {new}")
+
+        return changes
+
+    except Exception as e:
+        logger.error(f"Error loading strategy file: {e}")
+        return {}
+
+
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="HFT Trading Bot")
+    parser = argparse.ArgumentParser(
+        description="HFT Trading Bot",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Paper trading with default config
+  python -m hft_system.hft_bot
+
+  # Live trading with custom capital
+  python -m hft_system.hft_bot --live --capital 5000
+
+  # Use strategy from registry
+  python -m hft_system.hft_bot --strategy-file strategies/generated_active.yml
+
+  # Generate strategy file first:
+  python tools/registry_apply.py --symbol XRPUSDT --apply
+  python -m hft_system.hft_bot --strategy-file strategies/generated_active.yml
+        """
+    )
     parser.add_argument("--live", action="store_true", help="Run in live mode (default: paper)")
     parser.add_argument("--capital", type=float, default=10000, help="Initial capital")
+    parser.add_argument("--strategy-file", type=str, default=None,
+                        help="Path to strategy config file (YAML/JSON). "
+                             "Can also set HFT_STRATEGY_FILE env var.")
     args = parser.parse_args()
 
     mode = TradingMode.LIVE if args.live else TradingMode.PAPER
+
+    # Load strategy file if provided
+    strategy_changes = load_strategy_file(args.strategy_file)
+    if strategy_changes:
+        logger.info("=" * 60)
+        logger.info("STRATEGY OVERRIDE ACTIVE")
+        logger.info("=" * 60)
 
     bot = HFTBot(mode=mode, capital=args.capital)
 
