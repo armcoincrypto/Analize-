@@ -49,26 +49,68 @@ class StrategyMetrics:
 
 def calculate_pnl_after_costs(
     pnl_pct: float,
-    entry_fee_pct: float = 0.10,
-    exit_fee_pct: float = 0.10,
-    spread_cost_pct: float = 0.02,
-    slippage_pct: float = 0.02
+    entry_fee_pct: float = 0.075,  # Binance taker fee (0.075% with BNB discount)
+    exit_fee_pct: float = 0.075,   # Binance taker fee
+    spread_cost_pct: float = 0.005, # Half spread ~0.5 bps each way for liquid pairs
+    slippage_pct: float = 0.005    # Minimal slippage for small size
 ) -> float:
     """
     Calculate PnL after all trading costs.
 
+    Default costs (taker mode, liquid pairs):
+    - Entry fee: 0.075% (Binance taker with BNB)
+    - Exit fee: 0.075%
+    - Spread: 0.005% x 2 = 0.01%
+    - Slippage: 0.005%
+    - TOTAL: ~0.165% per round-trip
+
+    For maker mode, use entry_fee_pct=0.02, exit_fee_pct=0.02
+
     Args:
         pnl_pct: Gross PnL percentage
-        entry_fee_pct: Entry fee (e.g., 0.10% for taker)
-        exit_fee_pct: Exit fee (e.g., 0.10% for taker)
-        spread_cost_pct: Half spread cost (each way)
-        slippage_pct: Market impact
+        entry_fee_pct: Entry fee (default 0.075% for taker)
+        exit_fee_pct: Exit fee (default 0.075% for taker)
+        spread_cost_pct: Half spread cost each way (default 0.005%)
+        slippage_pct: Market impact (default 0.005%)
 
     Returns:
         Net PnL percentage after costs
     """
     total_costs = entry_fee_pct + exit_fee_pct + (2 * spread_cost_pct) + slippage_pct
     return pnl_pct - total_costs
+
+
+# Pre-configured cost models
+COST_MODEL_TAKER = {
+    "entry_fee_pct": 0.075,
+    "exit_fee_pct": 0.075,
+    "spread_cost_pct": 0.005,
+    "slippage_pct": 0.005
+}  # Total: ~0.165%
+
+COST_MODEL_MAKER = {
+    "entry_fee_pct": 0.02,
+    "exit_fee_pct": 0.02,
+    "spread_cost_pct": 0.005,
+    "slippage_pct": 0.002
+}  # Total: ~0.052%
+
+COST_MODEL_ZERO = {
+    "entry_fee_pct": 0.0,
+    "exit_fee_pct": 0.0,
+    "spread_cost_pct": 0.0,
+    "slippage_pct": 0.0
+}  # Total: 0% (for testing gross PnL)
+
+
+def get_cost_model(name: str = "taker") -> dict:
+    """Get a predefined cost model by name."""
+    models = {
+        "taker": COST_MODEL_TAKER,
+        "maker": COST_MODEL_MAKER,
+        "zero": COST_MODEL_ZERO
+    }
+    return models.get(name.lower(), COST_MODEL_TAKER)
 
 
 def calculate_max_drawdown(equity_curve: List[float]) -> float:

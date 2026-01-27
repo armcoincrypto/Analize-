@@ -34,6 +34,8 @@ from .metrics import (
     calculate_metrics,
     calculate_pnl_after_costs,
     metrics_to_dict,
+    get_cost_model,
+    COST_MODEL_TAKER,
 )
 
 logger = logging.getLogger(__name__)
@@ -226,18 +228,24 @@ class SimpleBacktestEngine:
     price momentum (candle patterns) rather than full orderbook data.
     """
 
-    def __init__(self, candles: List[Dict], random_seed: int = 42):
+    def __init__(self, candles: List[Dict], random_seed: int = 42, cost_model: str = "taker"):
         """
         Initialize with candle data.
 
         Args:
             candles: List of candle dicts with keys: timestamp, open, high, low, close, volume
             random_seed: Random seed for deterministic results
+            cost_model: Cost model to use ("taker", "maker", or "zero")
         """
         self.candles = candles
         self.random_seed = random_seed
+        self.cost_model = get_cost_model(cost_model)
         random.seed(random_seed)
         np.random.seed(random_seed)
+
+    def _calc_pnl_after_costs(self, pnl_pct: float) -> float:
+        """Calculate PnL after costs using configured cost model."""
+        return calculate_pnl_after_costs(pnl_pct, **self.cost_model)
 
     def check_entry_signal(self, idx: int, params: ParameterSet) -> Optional[str]:
         """
@@ -333,7 +341,7 @@ class SimpleBacktestEngine:
                     entry_price=entry_price,
                     exit_price=exit_price,
                     pnl_pct=pnl_pct,
-                    pnl_after_costs_pct=calculate_pnl_after_costs(pnl_pct),
+                    pnl_after_costs_pct=self._calc_pnl_after_costs(pnl_pct),
                     side=side,
                     exit_reason="stop_loss"
                 )
@@ -348,7 +356,7 @@ class SimpleBacktestEngine:
                     entry_price=entry_price,
                     exit_price=exit_price,
                     pnl_pct=pnl_pct,
-                    pnl_after_costs_pct=calculate_pnl_after_costs(pnl_pct),
+                    pnl_after_costs_pct=self._calc_pnl_after_costs(pnl_pct),
                     side=side,
                     exit_reason="take_profit"
                 )
@@ -363,7 +371,7 @@ class SimpleBacktestEngine:
                     entry_price=entry_price,
                     exit_price=exit_price,
                     pnl_pct=pnl_pct,
-                    pnl_after_costs_pct=calculate_pnl_after_costs(pnl_pct),
+                    pnl_after_costs_pct=self._calc_pnl_after_costs(pnl_pct),
                     side=side,
                     exit_reason="time_stop"
                 )
@@ -381,7 +389,7 @@ class SimpleBacktestEngine:
             entry_price=entry_price,
             exit_price=last["close"],
             pnl_pct=pnl_pct,
-            pnl_after_costs_pct=calculate_pnl_after_costs(pnl_pct),
+            pnl_after_costs_pct=self._calc_pnl_after_costs(pnl_pct),
             side=side,
             exit_reason="end_of_data"
         )
@@ -443,7 +451,8 @@ class WalkForwardEngine:
         candles: List[Dict],
         train_days: int = 14,
         test_days: int = 7,
-        random_seed: int = 42
+        random_seed: int = 42,
+        cost_model: str = "taker"
     ):
         """
         Initialize walk-forward engine.
@@ -453,11 +462,13 @@ class WalkForwardEngine:
             train_days: Days for training window
             test_days: Days for test window
             random_seed: Random seed for reproducibility
+            cost_model: Cost model for backtest ("taker", "maker", "zero")
         """
         self.candles = sorted(candles, key=lambda x: x["timestamp"])
         self.train_days = train_days
         self.test_days = test_days
         self.random_seed = random_seed
+        self.cost_model = cost_model
 
         # Convert timestamps to datetime for windowing
         self.start_time = self.candles[0]["timestamp"]
@@ -516,7 +527,7 @@ class WalkForwardEngine:
         best_metrics = None
         best_score = float('-inf')
 
-        engine = SimpleBacktestEngine(self.candles, self.random_seed)
+        engine = SimpleBacktestEngine(self.candles, self.random_seed, self.cost_model)
 
         for params in param_grid.iterate():
             trades = engine.run_backtest(params, start_ms, end_ms)
@@ -554,7 +565,7 @@ class WalkForwardEngine:
         start_ms = int(test_start.timestamp() * 1000)
         end_ms = int(test_end.timestamp() * 1000)
 
-        engine = SimpleBacktestEngine(self.candles, self.random_seed)
+        engine = SimpleBacktestEngine(self.candles, self.random_seed, self.cost_model)
         trades = engine.run_backtest(params, start_ms, end_ms)
 
         return calculate_metrics(trades)
@@ -657,7 +668,8 @@ class WalkForwardEngine3Way:
         train_days: int = 14,
         valid_days: int = 7,
         final_test_days: int = 7,
-        random_seed: int = 42
+        random_seed: int = 42,
+        cost_model: str = "taker"
     ):
         """
         Initialize 3-way walk-forward engine.
@@ -668,12 +680,14 @@ class WalkForwardEngine3Way:
             valid_days: Days for validation window
             final_test_days: Days for final test window (held out)
             random_seed: Random seed for reproducibility
+            cost_model: Cost model for backtest ("taker", "maker", "zero")
         """
         self.candles = sorted(candles, key=lambda x: x["timestamp"])
         self.train_days = train_days
         self.valid_days = valid_days
         self.final_test_days = final_test_days
         self.random_seed = random_seed
+        self.cost_model = cost_model
 
         # Convert timestamps to datetime for windowing
         self.start_time = self.candles[0]["timestamp"]
@@ -737,7 +751,7 @@ class WalkForwardEngine3Way:
         results = []
         configs_tried = 0
 
-        engine = SimpleBacktestEngine(self.candles, self.random_seed)
+        engine = SimpleBacktestEngine(self.candles, self.random_seed, self.cost_model)
 
         for params in param_grid.iterate():
             configs_tried += 1
@@ -782,7 +796,7 @@ class WalkForwardEngine3Way:
         start_ms = int(valid_start.timestamp() * 1000)
         end_ms = int(valid_end.timestamp() * 1000)
 
-        engine = SimpleBacktestEngine(self.candles, self.random_seed)
+        engine = SimpleBacktestEngine(self.candles, self.random_seed, self.cost_model)
 
         best_params = None
         best_train_metrics = None
@@ -830,7 +844,7 @@ class WalkForwardEngine3Way:
         start_ms = int(final_test_start.timestamp() * 1000)
         end_ms = int(final_test_end.timestamp() * 1000)
 
-        engine = SimpleBacktestEngine(self.candles, self.random_seed)
+        engine = SimpleBacktestEngine(self.candles, self.random_seed, self.cost_model)
         trades = engine.run_backtest(params, start_ms, end_ms)
 
         return calculate_metrics(trades)
@@ -1024,7 +1038,8 @@ def walk_forward_run_3way(
     final_test_days: int = 7,
     param_grid: ParameterGrid = None,
     random_seed: int = 42,
-    top_n_validate: int = 5
+    top_n_validate: int = 5,
+    cost_model: str = "taker"
 ) -> WalkForwardResult3Way:
     """
     Convenience function to run 3-way walk-forward optimization.
@@ -1045,6 +1060,7 @@ def walk_forward_run_3way(
         param_grid: Parameter grid (uses default if None)
         random_seed: Random seed
         top_n_validate: Number of top candidates to validate
+        cost_model: Cost model ("taker", "maker", "zero")
 
     Returns:
         WalkForwardResult3Way with unbiased final test metrics
@@ -1060,7 +1076,7 @@ def walk_forward_run_3way(
     if len(filtered) < 100:
         raise ValueError(f"Not enough candles ({len(filtered)}) for walk-forward analysis")
 
-    engine = WalkForwardEngine3Way(filtered, train_days, valid_days, final_test_days, random_seed)
+    engine = WalkForwardEngine3Way(filtered, train_days, valid_days, final_test_days, random_seed, cost_model)
     result = engine.run(param_grid, top_n_validate)
     result.symbol = symbol
 
@@ -1075,7 +1091,8 @@ def walk_forward_run(
     train_days: int = 14,
     test_days: int = 7,
     param_grid: ParameterGrid = None,
-    random_seed: int = 42
+    random_seed: int = 42,
+    cost_model: str = "taker"
 ) -> WalkForwardResult:
     """
     Convenience function to run walk-forward optimization.
@@ -1089,6 +1106,7 @@ def walk_forward_run(
         test_days: Test window size
         param_grid: Parameter grid (uses default if None)
         random_seed: Random seed
+        cost_model: Cost model ("taker", "maker", "zero")
 
     Returns:
         WalkForwardResult
@@ -1104,7 +1122,7 @@ def walk_forward_run(
     if len(filtered) < 100:
         raise ValueError(f"Not enough candles ({len(filtered)}) for walk-forward analysis")
 
-    engine = WalkForwardEngine(filtered, train_days, test_days, random_seed)
+    engine = WalkForwardEngine(filtered, train_days, test_days, random_seed, cost_model)
     result = engine.run(param_grid)
     result.symbol = symbol
 
