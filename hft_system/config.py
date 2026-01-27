@@ -378,6 +378,54 @@ class WinnerGateConfig:
 WINNER_GATE = WinnerGateConfig()
 
 
+# ============================================================
+# RUNTIME ALARMS — Monitoring and Safety Controls
+# ============================================================
+# Automatic monitoring during trading to prevent runaway losses.
+# Safe-by-default: alarms are enabled in LIVE mode.
+# ============================================================
+@dataclass
+class RuntimeAlarmsConfig:
+    """Runtime monitoring and safety alarms."""
+
+    # Master switch
+    enabled: bool = True
+
+    # === LOSS STREAK ALARM ===
+    # Pause trading if last N trades have negative PnL
+    loss_streak_enabled: bool = True
+    loss_streak_window: int = 50  # Check last 50 trades
+    loss_streak_threshold_pct: float = -0.50  # Pause if cumulative PnL < -0.50%
+    loss_streak_pause_minutes: int = 30  # Pause trading for 30 minutes
+
+    # === SPREAD INSTABILITY ALARM ===
+    # Tighten filters if spread_unstable blocks spike
+    spread_alarm_enabled: bool = True
+    spread_alarm_block_threshold: int = 10  # Alert after 10 spread blocks in window
+    spread_alarm_window_minutes: int = 5  # 5-minute window
+    spread_alarm_tighten_factor: float = 0.8  # Reduce max_spread by 20%
+
+    # === DRAWDOWN ALARM ===
+    # Pause trading if drawdown exceeds threshold
+    drawdown_alarm_enabled: bool = True
+    drawdown_alarm_threshold_pct: float = 3.0  # Pause if session drawdown > 3%
+    drawdown_alarm_pause_minutes: int = 60  # Pause for 1 hour
+
+    # === WIN RATE ALARM ===
+    # Alert if win rate drops too low
+    winrate_alarm_enabled: bool = True
+    winrate_alarm_window: int = 20  # Check last 20 trades
+    winrate_alarm_threshold_pct: float = 20.0  # Alert if WR < 20%
+
+    # === LIVE MODE SAFETY ===
+    # Extra safety for live trading
+    live_mode_fail_closed: bool = True  # Stop trading on any alarm in LIVE mode
+    paper_mode_log_only: bool = True  # In PAPER mode, just log warnings (don't pause)
+
+
+RUNTIME_ALARMS = RuntimeAlarmsConfig()
+
+
 # Global configs
 RISK_CONFIG = RiskConfig()
 SYSTEM_CONFIG = SystemConfig()

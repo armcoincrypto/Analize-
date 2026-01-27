@@ -36,7 +36,7 @@ import time
 import argparse
 from datetime import datetime
 
-from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config, WINNER_GATE, COST_MODEL, REGIME_HYSTERESIS
+from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config, WINNER_GATE, COST_MODEL, REGIME_HYSTERESIS, RUNTIME_ALARMS
 from .websocket_manager import WebSocketManager
 from .signal_engine import SignalEngine
 from .risk_controller import RiskController, ConfidenceTier, ConfidenceScore
@@ -143,6 +143,18 @@ class HFTBot:
 
         # CAUSE POLICY TRACKING: FULL vs PROBE classification
         self.current_cause_class: dict = {}  # symbol -> "FULL" or "PROBE"
+
+        # ============================================================
+        # RUNTIME ALARMS: Monitoring and Safety Controls
+        # ============================================================
+        self.alarm_trading_paused = False  # True when trading is paused due to alarm
+        self.alarm_pause_until: float = 0  # Timestamp when pause ends
+        self.alarm_pause_reason: str = ""  # Reason for pause
+        self.recent_trade_pnls: list = []  # Rolling window of recent trade PnLs
+        self.spread_block_timestamps: list = []  # Timestamps of spread_unstable blocks
+        self.session_peak_equity: float = 100.0  # Track peak equity for drawdown
+        self.session_current_equity: float = 100.0  # Current session equity
+        self.alarm_triggered_count: int = 0  # Total alarms triggered
 
         logger.info("=" * 60)
         logger.info("STRATEGY LOCKED - EDGE PRESERVATION PHASE")
@@ -334,6 +346,13 @@ class HFTBot:
         """Handle new signal from signal engine."""
         self.signals_generated += 1
 
+        # ============================================================
+        # RUNTIME ALARM CHECK: Block signals if trading is paused
+        # ============================================================
+        if self._check_alarm_pause():
+            logger.debug(f"Signal BLOCKED: {signal.symbol} - trading paused due to alarm")
+            return
+
         # TASK 10: Check market regime filter
         current_regime = self.current_regime.get(signal.symbol, "unknown")
 
@@ -388,6 +407,9 @@ class HFTBot:
                     regime=current_regime
                 )
                 self.signals_blocked += 1
+                # Track spread-related blocks for alarm
+                if "spread" in block_reason.lower():
+                    self._check_spread_alarm(signal.symbol)
                 return
 
         # Check risk
@@ -898,6 +920,156 @@ class HFTBot:
                 final_pnl_pct=result.pnl_pct,
                 exit_reason=result.reason.value
             )
+
+        # ============================================================
+        # RUNTIME ALARMS: Check for alarm conditions after each trade
+        # ============================================================
+        self._check_runtime_alarms(result)
+
+    def _check_runtime_alarms(self, result):
+        """
+        Check for runtime alarm conditions after each trade exit.
+
+        Alarms:
+        1. Loss streak: Cumulative PnL of last N trades below threshold
+        2. Win rate: Win rate of last N trades below threshold
+        3. Drawdown: Session drawdown exceeds threshold
+        """
+        if not RUNTIME_ALARMS.enabled:
+            return
+
+        # Track this trade's PnL
+        pnl = result.pnl_pct if hasattr(result, 'pnl_pct') else 0
+        self.recent_trade_pnls.append(pnl)
+
+        # Keep only the window size
+        max_window = max(
+            RUNTIME_ALARMS.loss_streak_window,
+            RUNTIME_ALARMS.winrate_alarm_window
+        )
+        if len(self.recent_trade_pnls) > max_window:
+            self.recent_trade_pnls = self.recent_trade_pnls[-max_window:]
+
+        # Update session equity for drawdown tracking
+        self.session_current_equity *= (1 + pnl / 100)
+        if self.session_current_equity > self.session_peak_equity:
+            self.session_peak_equity = self.session_current_equity
+
+        is_live = self.mode == TradingMode.LIVE
+
+        # === Check Loss Streak Alarm ===
+        if RUNTIME_ALARMS.loss_streak_enabled and len(self.recent_trade_pnls) >= RUNTIME_ALARMS.loss_streak_window:
+            window_pnls = self.recent_trade_pnls[-RUNTIME_ALARMS.loss_streak_window:]
+            cumulative_pnl = sum(window_pnls)
+
+            if cumulative_pnl < RUNTIME_ALARMS.loss_streak_threshold_pct:
+                self._trigger_alarm(
+                    f"LOSS_STREAK: Last {RUNTIME_ALARMS.loss_streak_window} trades = {cumulative_pnl:.4f}% (threshold: {RUNTIME_ALARMS.loss_streak_threshold_pct}%)",
+                    pause_minutes=RUNTIME_ALARMS.loss_streak_pause_minutes,
+                    is_live=is_live
+                )
+
+        # === Check Win Rate Alarm ===
+        if RUNTIME_ALARMS.winrate_alarm_enabled and len(self.recent_trade_pnls) >= RUNTIME_ALARMS.winrate_alarm_window:
+            window_pnls = self.recent_trade_pnls[-RUNTIME_ALARMS.winrate_alarm_window:]
+            wins = sum(1 for p in window_pnls if p > 0)
+            win_rate = (wins / len(window_pnls)) * 100
+
+            if win_rate < RUNTIME_ALARMS.winrate_alarm_threshold_pct:
+                self._trigger_alarm(
+                    f"LOW_WINRATE: Last {RUNTIME_ALARMS.winrate_alarm_window} trades = {win_rate:.1f}% WR (threshold: {RUNTIME_ALARMS.winrate_alarm_threshold_pct}%)",
+                    pause_minutes=0,  # Just warn, don't pause
+                    is_live=is_live
+                )
+
+        # === Check Drawdown Alarm ===
+        if RUNTIME_ALARMS.drawdown_alarm_enabled:
+            drawdown_pct = (self.session_peak_equity - self.session_current_equity) / self.session_peak_equity * 100
+
+            if drawdown_pct > RUNTIME_ALARMS.drawdown_alarm_threshold_pct:
+                self._trigger_alarm(
+                    f"DRAWDOWN: Session drawdown = {drawdown_pct:.2f}% (threshold: {RUNTIME_ALARMS.drawdown_alarm_threshold_pct}%)",
+                    pause_minutes=RUNTIME_ALARMS.drawdown_alarm_pause_minutes,
+                    is_live=is_live
+                )
+
+    def _trigger_alarm(self, reason: str, pause_minutes: int, is_live: bool):
+        """
+        Trigger a runtime alarm.
+
+        In LIVE mode with fail_closed: Pause trading.
+        In PAPER mode with log_only: Just log warning.
+        """
+        self.alarm_triggered_count += 1
+
+        if is_live and RUNTIME_ALARMS.live_mode_fail_closed:
+            # LIVE MODE: Actually pause trading
+            if pause_minutes > 0:
+                self.alarm_trading_paused = True
+                self.alarm_pause_until = time.time() + (pause_minutes * 60)
+                self.alarm_pause_reason = reason
+                logger.error(f"RUNTIME ALARM (LIVE): {reason}")
+                logger.error(f"  Trading PAUSED for {pause_minutes} minutes")
+            else:
+                logger.warning(f"RUNTIME ALARM (LIVE): {reason}")
+        elif not is_live and RUNTIME_ALARMS.paper_mode_log_only:
+            # PAPER MODE: Just log
+            logger.warning(f"RUNTIME ALARM (PAPER): {reason}")
+        else:
+            # Default: log and maybe pause
+            if pause_minutes > 0:
+                self.alarm_trading_paused = True
+                self.alarm_pause_until = time.time() + (pause_minutes * 60)
+                self.alarm_pause_reason = reason
+            logger.warning(f"RUNTIME ALARM: {reason}")
+
+    def _check_alarm_pause(self) -> bool:
+        """
+        Check if trading is paused due to alarm.
+
+        Returns True if trading should be blocked.
+        """
+        if not self.alarm_trading_paused:
+            return False
+
+        if time.time() >= self.alarm_pause_until:
+            # Pause period ended
+            logger.info(f"ALARM PAUSE ENDED: {self.alarm_pause_reason}")
+            self.alarm_trading_paused = False
+            self.alarm_pause_reason = ""
+            # Reset recent trades to give fresh start
+            self.recent_trade_pnls = []
+            return False
+
+        # Still paused
+        remaining = (self.alarm_pause_until - time.time()) / 60
+        logger.debug(f"Trading paused ({remaining:.1f} min remaining): {self.alarm_pause_reason}")
+        return True
+
+    def _check_spread_alarm(self, symbol: str):
+        """
+        Track spread_unstable blocks and trigger alarm if too many.
+
+        Call this when a signal is blocked due to spread_unstable.
+        """
+        if not RUNTIME_ALARMS.spread_alarm_enabled:
+            return
+
+        now = time.time()
+        self.spread_block_timestamps.append(now)
+
+        # Remove old timestamps outside window
+        cutoff = now - (RUNTIME_ALARMS.spread_alarm_window_minutes * 60)
+        self.spread_block_timestamps = [t for t in self.spread_block_timestamps if t > cutoff]
+
+        if len(self.spread_block_timestamps) >= RUNTIME_ALARMS.spread_alarm_block_threshold:
+            logger.warning(
+                f"SPREAD ALARM: {len(self.spread_block_timestamps)} spread blocks in "
+                f"{RUNTIME_ALARMS.spread_alarm_window_minutes} min (threshold: {RUNTIME_ALARMS.spread_alarm_block_threshold})"
+            )
+            logger.warning(f"  Consider tightening spread filter by {(1-RUNTIME_ALARMS.spread_alarm_tighten_factor)*100:.0f}%")
+            # Clear to prevent repeated alarms
+            self.spread_block_timestamps = []
 
     async def _signal_scan_loop(self):
         """Periodically scan for signals."""
