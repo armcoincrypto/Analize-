@@ -93,6 +93,7 @@ class TradeLogger:
                 -- Cost model fields (realistic trading costs)
                 entry_fee_pct REAL DEFAULT 0,
                 exit_fee_pct REAL DEFAULT 0,
+                fees_paid_pct REAL DEFAULT 0,
                 spread_cost_pct REAL DEFAULT 0,
                 slippage_pct REAL DEFAULT 0,
                 total_costs_pct REAL DEFAULT 0,
@@ -112,6 +113,7 @@ class TradeLogger:
         try:
             cursor.execute("ALTER TABLE trades ADD COLUMN entry_fee_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN exit_fee_pct REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE trades ADD COLUMN fees_paid_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN spread_cost_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN slippage_pct REAL DEFAULT 0")
             cursor.execute("ALTER TABLE trades ADD COLUMN total_costs_pct REAL DEFAULT 0")
@@ -690,6 +692,7 @@ class TradeLogger:
             if COST_MODEL.enabled:
                 entry_fee = COST_MODEL.entry_fee_pct
                 exit_fee = COST_MODEL.exit_fee_pct
+                fees_paid = entry_fee + exit_fee  # Combined fees
                 spread_cost = COST_MODEL.spread_cost_pct
 
                 # Slippage: higher when imbalance is extreme (OB looks good but disappears)
@@ -699,18 +702,27 @@ class TradeLogger:
                 )
 
                 # Total round-trip costs
-                total_costs = entry_fee + exit_fee + (2 * spread_cost) + slippage
+                total_costs = fees_paid + (2 * spread_cost) + slippage
                 pnl_after_costs = result.pnl_pct - total_costs
             else:
                 entry_fee = 0
                 exit_fee = 0
+                fees_paid = 0
                 spread_cost = 0
                 slippage = 0
                 total_costs = 0
                 pnl_after_costs = result.pnl_pct
 
-            # Get execution mode for logging
-            execution_mode = COST_MODEL.execution_mode if COST_MODEL.enabled else "taker"
+            # Get execution mode for logging (handle "auto" mode)
+            if COST_MODEL.enabled:
+                execution_mode = COST_MODEL.execution_mode
+                # If auto mode, we'd need the spread at exit to determine actual mode
+                # For now, log the configured mode - actual mode is determined at entry
+                if execution_mode == "auto":
+                    # Default to taker for auto mode logging (actual decision made at entry)
+                    execution_mode = "taker"
+            else:
+                execution_mode = "taker"
 
             # Update trade with exit info and costs
             cursor.execute("""
@@ -725,6 +737,7 @@ class TradeLogger:
                     mae = ?,
                     entry_fee_pct = ?,
                     exit_fee_pct = ?,
+                    fees_paid_pct = ?,
                     spread_cost_pct = ?,
                     slippage_pct = ?,
                     total_costs_pct = ?,
@@ -744,6 +757,7 @@ class TradeLogger:
                 mae,
                 entry_fee,
                 exit_fee,
+                fees_paid,
                 spread_cost,
                 slippage,
                 total_costs,

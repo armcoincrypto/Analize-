@@ -45,6 +45,7 @@ REQUIRED_SCHEMA: Dict[str, List[Tuple[str, str, str]]] = {
         # Cost model fields
         ("entry_fee_pct", "REAL", "0"),
         ("exit_fee_pct", "REAL", "0"),
+        ("fees_paid_pct", "REAL", "0"),  # Combined: entry_fee + exit_fee
         ("spread_cost_pct", "REAL", "0"),
         ("slippage_pct", "REAL", "0"),
         ("total_costs_pct", "REAL", "0"),

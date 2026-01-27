@@ -122,7 +122,11 @@ class CostModelConfig:
     # === EXECUTION MODE ===
     # "taker" = market orders (instant fill, high fees)
     # "maker" = limit orders (may not fill, low fees)
-    execution_mode: str = "taker"  # "taker" or "maker"
+    # "auto" = choose maker when spread <= auto_maker_spread_threshold
+    execution_mode: str = "taker"  # "taker", "maker", or "auto"
+
+    # Auto mode: use maker when spread is tight enough
+    auto_maker_spread_threshold: float = 0.02  # Use maker if spread <= 0.02%
 
     # === TAKER COSTS (market orders) ===
     taker_entry_fee_pct: float = 0.10  # 0.10% taker fee
@@ -166,6 +170,48 @@ class CostModelConfig:
 
     # Legacy compatibility
     imbalance_slippage_factor: float = 0.02  # Extra slippage when imbalance is extreme (taker only)
+
+    def get_effective_mode(self, current_spread_pct: float = None) -> str:
+        """
+        Get the effective execution mode based on config and market conditions.
+
+        Args:
+            current_spread_pct: Current bid-ask spread as percentage (for "auto" mode)
+
+        Returns:
+            "maker" or "taker"
+        """
+        if self.execution_mode == "auto":
+            if current_spread_pct is not None and current_spread_pct <= self.auto_maker_spread_threshold:
+                return "maker"
+            return "taker"
+        return self.execution_mode
+
+    def get_total_round_trip_cost(self, mode: str = None) -> float:
+        """
+        Get total round-trip cost for a given execution mode.
+
+        Args:
+            mode: "maker" or "taker" (defaults to current execution_mode)
+
+        Returns:
+            Total cost as percentage
+        """
+        mode = mode or self.execution_mode
+        if mode == "maker":
+            return (
+                self.maker_entry_fee_pct +
+                self.maker_exit_fee_pct +
+                2 * self.maker_spread_cost_pct +
+                self.maker_slippage_pct
+            )
+        else:
+            return (
+                self.taker_entry_fee_pct +
+                self.taker_exit_fee_pct +
+                2 * self.taker_spread_cost_pct +
+                self.taker_slippage_pct
+            )
 
 
 COST_MODEL = CostModelConfig()
