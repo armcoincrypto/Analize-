@@ -232,6 +232,11 @@ class SystemConfig:
     # Database
     db_path: str = "hft_trades.db"
 
+    # Database schema guardrails
+    # Auto-migrate adds missing columns on startup (safe - never removes data)
+    # Set False in LIVE mode to fail fast instead of auto-fixing
+    auto_migrate_db: bool = True  # True for PAPER, should be False for LIVE
+
     # Assets to trade (data-backed: ATOM had 0% win rate in 19 trades - DISABLED)
     enabled_assets: List[str] = field(default_factory=lambda: ["SUI", "XRP"])
 

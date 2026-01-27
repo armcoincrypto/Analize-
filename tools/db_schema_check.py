@@ -2,211 +2,194 @@
 """
 Database Schema Check Tool
 ==========================
-Verifies that the database schema matches the expected structure.
+Verifies that the database schema matches the required structure.
+Uses the same REQUIRED_SCHEMA as the bot's startup check.
 
 Usage:
     python tools/db_schema_check.py --db hft_trades.db
+    python tools/db_schema_check.py --db hft_trades.db --migrate
 """
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 
+# Add parent dir to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-def check_table_schema(conn, table_name: str):
-    """Print table schema using PRAGMA table_info."""
-    cursor = conn.cursor()
-    print(f"\n{'='*60}")
-    print(f"TABLE: {table_name}")
-    print('='*60)
-
-    try:
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = cursor.fetchall()
-
-        if not columns:
-            print(f"  Table '{table_name}' does not exist!")
-            return False
-
-        print(f"  {'#':<3} {'Name':<25} {'Type':<15} {'NotNull':<8} {'Default':<15}")
-        print("-" * 70)
-
-        for col in columns:
-            cid, name, dtype, notnull, default, pk = col
-            default_str = str(default) if default else ""
-            print(f"  {cid:<3} {name:<25} {dtype:<15} {notnull:<8} {default_str:<15}")
-
-        print(f"\n  Total columns: {len(columns)}")
-        return True
-
-    except Exception as e:
-        print(f"  Error checking table: {e}")
-        return False
-
-
-def show_last_rows(conn, table_name: str, n: int = 5):
-    """Show last N rows from a table."""
-    cursor = conn.cursor()
-    print(f"\n  Last {n} rows:")
-
-    try:
-        # Get column names
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = [col[1] for col in cursor.fetchall()]
-
-        if not columns:
-            return
-
-        # Get last N rows
-        cursor.execute(f"SELECT * FROM {table_name} ORDER BY rowid DESC LIMIT {n}")
-        rows = cursor.fetchall()
-
-        if not rows:
-            print("  (no data)")
-            return
-
-        # Print header (first 6 columns max for readability)
-        show_cols = columns[:6]
-        header = " | ".join(f"{c[:15]:<15}" for c in show_cols)
-        print(f"  {header}")
-        print("  " + "-" * len(header))
-
-        # Print rows
-        for row in rows:
-            row_data = row[:6]
-            row_str = " | ".join(f"{str(v)[:15]:<15}" for v in row_data)
-            print(f"  {row_str}")
-
-    except Exception as e:
-        print(f"  Error fetching rows: {e}")
-
-
-def check_all_tables(conn):
-    """Check all expected tables."""
-    expected_tables = [
-        "trades",
-        "trade_causality",
-        "trade_edge",
-        "blocked_signals",
-        "winner_gate_blocks",
-        "market_regime",
-        "position_sizing",
-        "no_trade_zone_blocks"
-    ]
-
-    found = []
-    missing = []
-
-    for table in expected_tables:
-        if check_table_schema(conn, table):
-            found.append(table)
-            show_last_rows(conn, table, 5)
-        else:
-            missing.append(table)
-
-    return found, missing
+from hft_system.db_migrations import (
+    REQUIRED_SCHEMA,
+    check_schema,
+    apply_migrations,
+    print_schema_report,
+    table_exists,
+    get_table_columns
+)
 
 
 def check_data_integrity(conn):
     """Check data integrity and join quality."""
     cursor = conn.cursor()
-    print(f"\n{'='*60}")
-    print("DATA INTEGRITY CHECKS")
-    print('='*60)
-
-    checks = []
+    print(f"\n{'='*70}")
+    print(" DATA INTEGRITY CHECKS")
+    print('='*70)
 
     # Check 1: Total trades
     try:
         cursor.execute("SELECT COUNT(*) FROM trades WHERE status='closed'")
         total_trades = cursor.fetchone()[0]
         print(f"\n  Total closed trades: {total_trades}")
-        checks.append(("total_trades", total_trades))
-    except:
-        print("  ERROR: Cannot count trades")
+    except Exception as e:
+        print(f"  ERROR checking trades: {e}")
+        total_trades = 0
 
     # Check 2: Trades with MFE/MAE data
-    try:
-        cursor.execute("SELECT COUNT(*) FROM trades WHERE status='closed' AND (mfe != 0 OR mae != 0)")
-        mfe_trades = cursor.fetchone()[0]
-        pct = (mfe_trades / total_trades * 100) if total_trades > 0 else 0
-        print(f"  Trades with MFE/MAE: {mfe_trades} ({pct:.1f}%)")
-        checks.append(("mfe_coverage", pct))
-    except:
-        print("  ERROR: Cannot check MFE/MAE")
+    if total_trades > 0:
+        try:
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status='closed' AND (mfe IS NOT NULL AND mfe != 0)")
+            mfe_trades = cursor.fetchone()[0]
+            pct = (mfe_trades / total_trades * 100)
+            status = "OK" if pct > 50 else "LOW"
+            print(f"  Trades with MFE/MAE: {mfe_trades}/{total_trades} ({pct:.1f}%) [{status}]")
+        except Exception as e:
+            print(f"  ERROR checking MFE/MAE: {e}")
 
-    # Check 3: Trade causality join rate
+    # Check 3: Trade causality join rate (using trade_id, not id)
+    if total_trades > 0:
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN tc.trade_id IS NOT NULL THEN 1 ELSE 0 END) as joined
+                FROM trades t
+                LEFT JOIN trade_causality tc ON t.trade_id = tc.trade_id
+                WHERE t.status = 'closed'
+            """)
+            row = cursor.fetchone()
+            join_rate = (row[1] / row[0] * 100) if row[0] > 0 else 0
+            status = "OK" if join_rate > 80 else "LOW"
+            print(f"  Trade->Causality join rate: {row[1]}/{row[0]} ({join_rate:.1f}%) [{status}]")
+        except Exception as e:
+            print(f"  ERROR checking causality join: {e}")
+
+    # Check 4: Cost model coverage
+    if total_trades > 0:
+        try:
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE total_costs_pct IS NOT NULL AND total_costs_pct > 0 AND status='closed'")
+            with_costs = cursor.fetchone()[0]
+            pct = (with_costs / total_trades * 100)
+            status = "OK" if pct > 50 else "LOW"
+            print(f"  Trades with cost data: {with_costs}/{total_trades} ({pct:.1f}%) [{status}]")
+        except Exception as e:
+            print(f"  ERROR checking costs: {e}")
+
+    # Check 5: Probe trades (new feature)
+    try:
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE is_probe_cause = 1 AND status='closed'")
+        probe_count = cursor.fetchone()[0]
+        print(f"  PROBE trades: {probe_count}")
+    except Exception as e:
+        print(f"  (is_probe_cause column not found - needs migration)")
+
+
+def show_recent_activity(conn):
+    """Show recent trades and blocks."""
+    cursor = conn.cursor()
+    print(f"\n{'='*70}")
+    print(" RECENT ACTIVITY")
+    print('='*70)
+
+    # Last 5 trades
     try:
         cursor.execute("""
             SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN tc.trade_id IS NOT NULL THEN 1 ELSE 0 END) as joined
-            FROM trades t
-            LEFT JOIN trade_causality tc ON t.id = tc.trade_id
-            WHERE t.status = 'closed'
+                datetime(entry_time/1000, 'unixepoch') as entry,
+                symbol, side, exit_reason,
+                ROUND(pnl_after_costs_pct, 4) as net_pnl,
+                COALESCE(cause_class, 'FULL') as class
+            FROM trades
+            WHERE status = 'closed'
+            ORDER BY entry_time DESC
+            LIMIT 5
         """)
-        row = cursor.fetchone()
-        join_rate = (row[1] / row[0] * 100) if row[0] > 0 else 0
-        print(f"  Trade->Causality join rate: {row[1]}/{row[0]} ({join_rate:.1f}%)")
-        checks.append(("causality_join", join_rate))
-    except:
-        print("  ERROR: Cannot check causality join")
-
-    # Check 4: Null execution_mode
-    try:
-        cursor.execute("SELECT COUNT(*) FROM trades WHERE execution_mode IS NULL AND status='closed'")
-        null_mode = cursor.fetchone()[0]
-        print(f"  Trades with NULL execution_mode: {null_mode}")
-        checks.append(("null_exec_mode", null_mode))
-    except:
-        print("  ERROR: Cannot check execution_mode")
-
-    # Check 5: Trades with 0 costs
-    try:
-        cursor.execute("SELECT COUNT(*) FROM trades WHERE total_costs_pct = 0 AND status='closed'")
-        zero_cost = cursor.fetchone()[0]
-        print(f"  Trades with zero costs: {zero_cost}")
-        checks.append(("zero_cost", zero_cost))
-    except:
-        print("  ERROR: Cannot check zero costs")
-
-    return checks
+        rows = cursor.fetchall()
+        if rows:
+            print("\n  Last 5 trades:")
+            print(f"  {'Entry':<20} {'Symbol':<6} {'Side':<6} {'Exit':<15} {'Net%':<10} {'Class':<6}")
+            print("  " + "-" * 65)
+            for row in rows:
+                entry, symbol, side, exit_reason, net_pnl, cls = row
+                print(f"  {entry:<20} {symbol:<6} {side:<6} {exit_reason or 'N/A':<15} {net_pnl or 0:>+8.4f}% {cls:<6}")
+        else:
+            print("\n  No recent trades")
+    except Exception as e:
+        print(f"  ERROR fetching recent trades: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Database Schema Check")
+    parser = argparse.ArgumentParser(
+        description="Database Schema Check - Verify required columns exist"
+    )
     parser.add_argument("--db", default="hft_trades.db", help="Database path")
+    parser.add_argument("--migrate", action="store_true", help="Auto-migrate missing columns")
+    parser.add_argument("--quiet", action="store_true", help="Only show problems")
     args = parser.parse_args()
 
+    # Find database
     db_path = Path(args.db)
     if not db_path.exists():
-        # Try home directory
-        home_path = Path.home() / "Analize-" / "hft_trades.db"
-        if home_path.exists():
-            db_path = home_path
-        else:
-            print(f"Error: Database not found at {db_path}")
-            return 1
+        for try_path in [
+            Path.cwd() / "hft_trades.db",
+            Path.home() / "Analize-" / "hft_trades.db",
+            Path("/root/Analize-/hft_trades.db")
+        ]:
+            if try_path.exists():
+                db_path = try_path
+                break
 
-    print(f"Database Schema Check: {db_path}")
-    print(f"{'='*60}")
+    if not db_path.exists():
+        print(f"ERROR: Database not found at {args.db}")
+        return 1
 
-    conn = sqlite3.connect(str(db_path))
+    # Run schema check
+    if not args.quiet:
+        print_schema_report(str(db_path))
 
-    try:
-        found, missing = check_all_tables(conn)
-        check_data_integrity(conn)
+    problems = check_schema(str(db_path))
 
-        print(f"\n{'='*60}")
-        print("SUMMARY")
-        print('='*60)
-        print(f"  Tables found: {len(found)}")
-        print(f"  Tables missing: {len(missing)}")
-        if missing:
-            print(f"  Missing: {', '.join(missing)}")
+    if problems and args.migrate:
+        print("\nApplying migrations...")
+        applied = apply_migrations(str(db_path))
+        if applied:
+            print(f"Applied {len(applied)} migrations:")
+            for m in applied:
+                print(f"  + {m}")
 
-    finally:
-        conn.close()
+        # Re-check
+        problems = check_schema(str(db_path))
+
+    # Data integrity checks
+    if not args.quiet:
+        try:
+            conn = sqlite3.connect(str(db_path))
+            check_data_integrity(conn)
+            show_recent_activity(conn)
+            conn.close()
+        except Exception as e:
+            print(f"ERROR during integrity check: {e}")
+
+    # Final summary
+    print(f"\n{'='*70}")
+    if problems:
+        print(f" RESULT: {len(problems)} schema issues found")
+        for p in problems:
+            print(f"   - {p}")
+        print("\n Run with --migrate to fix missing columns")
+        return 1
+    else:
+        print(" RESULT: Schema OK - all required columns present")
+    print('='*70)
 
     return 0
 

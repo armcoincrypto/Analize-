@@ -42,6 +42,7 @@ from .signal_engine import SignalEngine
 from .risk_controller import RiskController, ConfidenceTier, ConfidenceScore
 from .execution_engine import ExecutionEngine
 from .trade_logger import TradeLogger
+from .db_migrations import ensure_schema
 
 # Setup logging
 logging.basicConfig(
@@ -64,6 +65,16 @@ class HFTBot:
         self.mode = mode
         self.capital = capital or SYSTEM_CONFIG.initial_capital
         self.running = False
+
+        # ============================================================
+        # DATABASE SCHEMA GUARDRAILS
+        # ============================================================
+        # Verify DB has all required columns BEFORE trading starts.
+        # This prevents silent analytics failures from missing columns.
+        # Auto-migrate in PAPER mode, fail fast in LIVE mode.
+        # ============================================================
+        auto_migrate = SYSTEM_CONFIG.auto_migrate_db and (mode == TradingMode.PAPER)
+        ensure_schema(SYSTEM_CONFIG.db_path, auto_migrate=auto_migrate)
 
         # Initialize components
         self.ws_manager = WebSocketManager()

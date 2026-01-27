@@ -37,6 +37,7 @@ from .execution_engine import (
     ExitReason
 )
 from .trade_logger import TradeLogger
+from .db_migrations import ensure_schema, check_schema, apply_migrations, REQUIRED_SCHEMA
 from .hft_bot import HFTBot
 
 __all__ = [
@@ -66,5 +67,9 @@ __all__ = [
     "ExitResult",
     "ExitReason",
     "TradeLogger",
+    "ensure_schema",
+    "check_schema",
+    "apply_migrations",
+    "REQUIRED_SCHEMA",
     "HFTBot"
 ]
