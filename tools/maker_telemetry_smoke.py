@@ -247,7 +247,10 @@ Examples:
 
     print(f"Using database: {db_path}")
 
-    conn = sqlite3.connect(str(db_path))
+    # Use bot-safe connection with WAL mode
+    from hft_system.db import open_sqlite
+    conn = open_sqlite(str(db_path))
+
     # Normalize symbol for consistent DB queries
     symbol = normalize_db_symbol(args.symbol) if args.symbol else None
     success = run_smoke_test(conn, args.days, symbol)

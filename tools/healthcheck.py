@@ -17,13 +17,19 @@ Displays:
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from datetime import datetime
 
+# Add parent dir for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from hft_system.db import open_sqlite
+
 
 def get_db_connection(db_path: str):
-    """Connect to the database."""
-    conn = sqlite3.connect(db_path)
+    """Connect to the database with bot-safe WAL mode and busy_timeout."""
+    conn = open_sqlite(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 

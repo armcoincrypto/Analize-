@@ -38,6 +38,13 @@ from .execution_engine import (
 )
 from .trade_logger import TradeLogger
 from .db_migrations import ensure_schema, check_schema, apply_migrations, REQUIRED_SCHEMA
+from .db import (
+    open_sqlite,
+    execute_with_retry,
+    insert_with_retry,
+    short_lived_connection,
+    SafeTelemetryWriter
+)
 from .hft_bot import HFTBot
 from .symbol_utils import (
     normalize_symbol,

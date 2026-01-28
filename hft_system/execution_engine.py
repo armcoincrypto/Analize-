@@ -407,7 +407,10 @@ class ExecutionEngine:
                     avg_fill_price=fill_price,
                     market_data=market_data,
                     price_crossed_limit=False,
-                    cross_depth_bps=0
+                    cross_depth_bps=0,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    limit_price=limit_price
                 )
 
             logger.info(
@@ -420,7 +423,10 @@ class ExecutionEngine:
                 self.trade_logger.log_maker_order_cancelled(
                     order_id=order_id,
                     cancel_reason="timeout_no_fill",
-                    market_data=market_data
+                    market_data=market_data,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    limit_price=limit_price
                 )
 
             logger.info(

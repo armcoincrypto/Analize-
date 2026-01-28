@@ -26,6 +26,8 @@ from typing import Dict, List, Optional
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from hft_system.db import open_sqlite
+
 
 def print_header(title: str, char: str = "="):
     width = 70
@@ -391,8 +393,8 @@ def main():
         print(f"ERROR: Database not found at {args.db}")
         return 1
 
-    # Connect
-    conn = sqlite3.connect(str(db_path))
+    # Connect with bot-safe WAL mode and busy_timeout
+    conn = open_sqlite(str(db_path))
 
     # Get data
     stats = get_execution_mode_stats(conn, args.days)

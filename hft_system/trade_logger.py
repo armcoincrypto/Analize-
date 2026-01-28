@@ -39,6 +39,7 @@ class TradeLogger:
         self.db_path = db_path or SYSTEM_CONFIG.db_path
         self.conn = None
         self._db_lock = threading.Lock()  # Thread safety for database writes
+        self._maker_telemetry_writer = None  # Separate writer for maker telemetry
         self._init_database()
 
     def _safe_execute(self, operation_name: str, func):
@@ -53,20 +54,33 @@ class TradeLogger:
             except Exception as e:
                 logger.error(f"Error {operation_name}: {e}")
 
+    def _execute_with_retry(self, sql: str, params: tuple = (), max_retries: int = 5) -> bool:
+        """Execute SQL with retry logic for lock contention."""
+        delay_ms = 50
+        for attempt in range(max_retries):
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(sql, params)
+                    self.conn.commit()
+                    return True
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() or "busy" in str(e).lower():
+                    if attempt < max_retries - 1:
+                        time.sleep(delay_ms / 1000.0)
+                        delay_ms = min(delay_ms * 2, 2000)
+                        continue
+                    logger.warning(f"SQL retry exhausted after {max_retries} attempts: {e}")
+                    return False
+                raise
+        return False
+
     def _init_database(self):
         """Initialize database with required tables."""
-        # Allow multi-thread access and set timeout to avoid "database is locked"
-        self.conn = sqlite3.connect(
-            self.db_path,
-            check_same_thread=False,
-            timeout=5.0  # Shorter timeout - fail fast
-        )
+        # Import and use shared db helper
+        from .db import open_sqlite
+        self.conn = open_sqlite(self.db_path)
         self.conn.row_factory = sqlite3.Row
-        # Enable WAL mode for better concurrency
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=5000")  # 5 second busy timeout
-        self.conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes
-        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # Clear WAL at startup
 
         cursor = self.conn.cursor()
 
@@ -2366,44 +2380,44 @@ class TradeLogger:
         - Spread at post time
         - Queue position estimate
         """
-        try:
-            normalized_symbol = normalize_symbol(symbol)
-            best_bid = market_data.get("best_bid", 0)
-            best_ask = market_data.get("best_ask", 0)
-            mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
-            spread_pct = ((best_ask - best_bid) / mid_price * 100) if mid_price > 0 else 0
+        normalized_symbol = normalize_symbol(symbol)
+        best_bid = market_data.get("best_bid", 0)
+        best_ask = market_data.get("best_ask", 0)
+        mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+        spread_pct = ((best_ask - best_bid) / mid_price * 100) if mid_price > 0 else 0
+        queue_position = market_data.get("queue_position_estimate", 0)
+        posted_ts = int(time.time() * 1000)
 
-            # Estimate queue position (simplified - would need depth data)
-            queue_position = market_data.get("queue_position_estimate", 0)
+        sql = """
+            INSERT INTO maker_order_telemetry (
+                order_id, trade_id, symbol, side,
+                limit_price, quantity, order_type,
+                posted_ts,
+                best_bid_at_post, best_ask_at_post, spread_at_post_pct,
+                mid_price_at_post, queue_position_estimate,
+                status
+            ) VALUES (?, ?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, 'pending')
+        """
+        params = (
+            order_id,
+            trade_id,
+            normalized_symbol,
+            side,
+            limit_price,
+            quantity,
+            posted_ts,
+            best_bid,
+            best_ask,
+            round(spread_pct, 4),
+            mid_price,
+            queue_position
+        )
 
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                INSERT INTO maker_order_telemetry (
-                    order_id, trade_id, symbol, side,
-                    limit_price, quantity, order_type,
-                    posted_ts,
-                    best_bid_at_post, best_ask_at_post, spread_at_post_pct,
-                    mid_price_at_post, queue_position_estimate,
-                    status
-                ) VALUES (?, ?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, 'pending')
-            """, (
-                order_id,
-                trade_id,
-                normalized_symbol,
-                side,
-                limit_price,
-                quantity,
-                int(time.time() * 1000),
-                best_bid,
-                best_ask,
-                round(spread_pct, 4),
-                mid_price,
-                queue_position
-            ))
-            self.conn.commit()
+        success = self._execute_with_retry(sql, params)
+        if success:
             logger.debug(f"Maker order posted: {order_id} @ {limit_price}")
-        except Exception as e:
-            pass  # Silently ignore database lock errors
+        else:
+            logger.warning(f"Failed to persist maker order posted: {order_id}")
 
     def log_maker_order_filled(
         self,
@@ -2412,7 +2426,10 @@ class TradeLogger:
         avg_fill_price: float,
         market_data: dict,
         price_crossed_limit: bool = False,
-        cross_depth_bps: float = 0
+        cross_depth_bps: float = 0,
+        symbol: str = None,
+        side: str = None,
+        limit_price: float = None
     ):
         """
         PART 7: Log maker order fill.
@@ -2422,82 +2439,122 @@ class TradeLogger:
         - Fill ratio
         - Price movement during order life
         - Whether price crossed limit (for conservative fill model validation)
+
+        Added fallback: If order not found in DB (due to race/lock), insert it now.
         """
-        try:
-            filled_ts = int(time.time() * 1000)
-            best_bid = market_data.get("best_bid", 0)
-            best_ask = market_data.get("best_ask", 0)
-            spread_pct = 0
-            if best_bid and best_ask:
-                mid = (best_bid + best_ask) / 2
-                spread_pct = (best_ask - best_bid) / mid * 100 if mid > 0 else 0
+        filled_ts = int(time.time() * 1000)
+        best_bid = market_data.get("best_bid", 0)
+        best_ask = market_data.get("best_ask", 0)
+        spread_pct = 0
+        mid_price = 0
+        if best_bid and best_ask:
+            mid_price = (best_bid + best_ask) / 2
+            spread_pct = (best_ask - best_bid) / mid_price * 100 if mid_price > 0 else 0
 
-            cursor = self.conn.cursor()
+        # Try to get original order details with retry
+        row = None
+        for attempt in range(3):
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("""
+                        SELECT posted_ts, limit_price, quantity, mid_price_at_post, symbol, side
+                        FROM maker_order_telemetry
+                        WHERE order_id = ?
+                    """, (order_id,))
+                    row = cursor.fetchone()
+                break
+            except sqlite3.OperationalError as e:
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                logger.warning(f"Failed to query maker order {order_id}: {e}")
 
-            # Get original order details
-            cursor.execute("""
-                SELECT posted_ts, limit_price, quantity, mid_price_at_post
-                FROM maker_order_telemetry
-                WHERE order_id = ?
-            """, (order_id,))
-            row = cursor.fetchone()
+        if not row:
+            # FALLBACK: Insert the order now with filled status
+            # This handles race conditions where posted wasn't persisted
+            logger.info(f"Maker order {order_id} not found, inserting with filled status")
+            use_symbol = symbol or "UNKNOWN"
+            use_side = side or "UNKNOWN"
+            use_limit_price = limit_price or avg_fill_price
 
-            if not row:
-                logger.warning(f"Maker order not found: {order_id}")
-                return
+            insert_sql = """
+                INSERT INTO maker_order_telemetry (
+                    order_id, symbol, side, limit_price, quantity, order_type,
+                    posted_ts, filled_ts, filled_quantity, avg_fill_price,
+                    best_bid_at_post, best_ask_at_post, spread_at_post_pct,
+                    mid_price_at_post, best_bid_at_fill, best_ask_at_fill,
+                    spread_at_fill_pct, fill_ratio, status
+                ) VALUES (?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'filled')
+            """
+            insert_params = (
+                order_id, use_symbol, use_side, use_limit_price, filled_quantity,
+                filled_ts - 500,  # Assume posted 500ms before fill
+                filled_ts, filled_quantity, avg_fill_price,
+                best_bid, best_ask, round(spread_pct, 4), mid_price,
+                best_bid, best_ask, round(spread_pct, 4), 1.0
+            )
+            success = self._execute_with_retry(insert_sql, insert_params)
+            if success:
+                logger.debug(f"Maker order filled (fallback insert): {order_id}")
+            return
 
-            posted_ts, limit_price, quantity, mid_at_post = row
-            time_to_fill_ms = filled_ts - posted_ts
-            fill_ratio = filled_quantity / quantity if quantity > 0 else 0
-            slippage = ((avg_fill_price - limit_price) / limit_price * 100) if limit_price > 0 else 0
+        # Normal path: update existing order
+        posted_ts, db_limit_price, quantity, mid_at_post, db_symbol, db_side = row
+        time_to_fill_ms = filled_ts - posted_ts
+        fill_ratio = filled_quantity / quantity if quantity > 0 else 1.0
+        use_limit = db_limit_price or limit_price or avg_fill_price
+        slippage = ((avg_fill_price - use_limit) / use_limit * 100) if use_limit > 0 else 0
+        current_mid = mid_price
+        price_moved_pct = ((current_mid - mid_at_post) / mid_at_post * 100) if mid_at_post > 0 else 0
 
-            # Price movement since post
-            current_mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
-            price_moved_pct = ((current_mid - mid_at_post) / mid_at_post * 100) if mid_at_post > 0 else 0
-
-            # Update order record
-            cursor.execute("""
-                UPDATE maker_order_telemetry SET
-                    filled_ts = ?,
-                    time_to_fill_ms = ?,
-                    fill_ratio = ?,
-                    filled_quantity = ?,
-                    avg_fill_price = ?,
-                    slippage_from_limit_pct = ?,
-                    best_bid_at_fill = ?,
-                    best_ask_at_fill = ?,
-                    spread_at_fill_pct = ?,
-                    price_moved_pct = ?,
-                    price_crossed_limit = ?,
-                    cross_depth_bps = ?,
-                    status = ?
-                WHERE order_id = ?
-            """, (
-                filled_ts,
-                time_to_fill_ms,
-                round(fill_ratio, 4),
-                filled_quantity,
-                avg_fill_price,
-                round(slippage, 6),
-                best_bid,
-                best_ask,
-                round(spread_pct, 4),
-                round(price_moved_pct, 4),
-                1 if price_crossed_limit else 0,
-                round(cross_depth_bps, 2),
-                'filled' if fill_ratio >= 0.99 else 'partial',
-                order_id
-            ))
-            self.conn.commit()
+        update_sql = """
+            UPDATE maker_order_telemetry SET
+                filled_ts = ?,
+                time_to_fill_ms = ?,
+                fill_ratio = ?,
+                filled_quantity = ?,
+                avg_fill_price = ?,
+                slippage_from_limit_pct = ?,
+                best_bid_at_fill = ?,
+                best_ask_at_fill = ?,
+                spread_at_fill_pct = ?,
+                price_moved_pct = ?,
+                price_crossed_limit = ?,
+                cross_depth_bps = ?,
+                status = ?
+            WHERE order_id = ?
+        """
+        update_params = (
+            filled_ts,
+            time_to_fill_ms,
+            round(fill_ratio, 4),
+            filled_quantity,
+            avg_fill_price,
+            round(slippage, 6),
+            best_bid,
+            best_ask,
+            round(spread_pct, 4),
+            round(price_moved_pct, 4),
+            1 if price_crossed_limit else 0,
+            round(cross_depth_bps, 2),
+            'filled' if fill_ratio >= 0.99 else 'partial',
+            order_id
+        )
+        success = self._execute_with_retry(update_sql, update_params)
+        if success:
             logger.debug(f"Maker order filled: {order_id} | {fill_ratio*100:.0f}% in {time_to_fill_ms}ms")
-        except Exception as e:
-            pass  # Silently ignore database lock errors
+        else:
+            logger.warning(f"Failed to update maker order filled: {order_id}")
 
     def log_maker_order_cancelled(
         self,
         order_id: str,
         cancel_reason: str,
-        market_data: dict
+        market_data: dict,
+        symbol: str = None,
+        side: str = None,
+        limit_price: float = None
     ):
         """
         PART 7: Log maker order cancellation.
@@ -2507,61 +2564,96 @@ class TradeLogger:
         - price_moved: Market moved away from limit
         - signal_invalid: Original signal invalidated
         - manual: Manual cancellation
+
+        Added fallback: If order not found, insert with cancelled status.
         """
-        try:
-            cancelled_ts = int(time.time() * 1000)
-            best_bid = market_data.get("best_bid", 0)
-            best_ask = market_data.get("best_ask", 0)
-            spread_pct = 0
-            if best_bid and best_ask:
-                mid = (best_bid + best_ask) / 2
-                spread_pct = (best_ask - best_bid) / mid * 100 if mid > 0 else 0
+        cancelled_ts = int(time.time() * 1000)
+        best_bid = market_data.get("best_bid", 0)
+        best_ask = market_data.get("best_ask", 0)
+        spread_pct = 0
+        mid_price = 0
+        if best_bid and best_ask:
+            mid_price = (best_bid + best_ask) / 2
+            spread_pct = (best_ask - best_bid) / mid_price * 100 if mid_price > 0 else 0
 
-            cursor = self.conn.cursor()
+        # Try to get original order details with retry
+        row = None
+        for attempt in range(3):
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("""
+                        SELECT posted_ts, mid_price_at_post, symbol, side, limit_price
+                        FROM maker_order_telemetry
+                        WHERE order_id = ?
+                    """, (order_id,))
+                    row = cursor.fetchone()
+                break
+            except sqlite3.OperationalError as e:
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
 
-            # Get original order details
-            cursor.execute("""
-                SELECT posted_ts, mid_price_at_post
-                FROM maker_order_telemetry
-                WHERE order_id = ?
-            """, (order_id,))
-            row = cursor.fetchone()
+        if not row:
+            # FALLBACK: Insert the order now with cancelled status
+            logger.info(f"Maker order {order_id} not found, inserting with cancelled status")
+            use_symbol = symbol or "UNKNOWN"
+            use_side = side or "UNKNOWN"
+            use_limit_price = limit_price or mid_price
 
-            if not row:
-                return
-
-            posted_ts, mid_at_post = row
-            time_alive_ms = cancelled_ts - posted_ts
-
-            # Price movement since post
-            current_mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
-            price_moved_pct = ((current_mid - mid_at_post) / mid_at_post * 100) if mid_at_post > 0 else 0
-
-            cursor.execute("""
-                UPDATE maker_order_telemetry SET
-                    cancelled_ts = ?,
-                    time_to_fill_ms = ?,
-                    best_bid_at_fill = ?,
-                    best_ask_at_fill = ?,
-                    spread_at_fill_pct = ?,
-                    price_moved_pct = ?,
-                    cancel_reason = ?,
-                    status = 'cancelled'
-                WHERE order_id = ?
-            """, (
+            insert_sql = """
+                INSERT INTO maker_order_telemetry (
+                    order_id, symbol, side, limit_price, quantity, order_type,
+                    posted_ts, cancelled_ts,
+                    best_bid_at_post, best_ask_at_post, spread_at_post_pct,
+                    mid_price_at_post, cancel_reason, status
+                ) VALUES (?, ?, ?, ?, 0, 'limit', ?, ?, ?, ?, ?, ?, ?, 'cancelled')
+            """
+            insert_params = (
+                order_id, use_symbol, use_side, use_limit_price,
+                cancelled_ts - 500,  # Assume posted 500ms before cancel
                 cancelled_ts,
-                time_alive_ms,
-                best_bid,
-                best_ask,
-                round(spread_pct, 4),
-                round(price_moved_pct, 4),
-                cancel_reason,
-                order_id
-            ))
-            self.conn.commit()
+                best_bid, best_ask, round(spread_pct, 4), mid_price,
+                cancel_reason
+            )
+            success = self._execute_with_retry(insert_sql, insert_params)
+            if success:
+                logger.debug(f"Maker order cancelled (fallback insert): {order_id}")
+            return
+
+        # Normal path: update existing order
+        posted_ts, mid_at_post, db_symbol, db_side, db_limit_price = row
+        time_alive_ms = cancelled_ts - posted_ts
+        current_mid = mid_price
+        price_moved_pct = ((current_mid - mid_at_post) / mid_at_post * 100) if mid_at_post > 0 else 0
+
+        update_sql = """
+            UPDATE maker_order_telemetry SET
+                cancelled_ts = ?,
+                time_to_fill_ms = ?,
+                best_bid_at_fill = ?,
+                best_ask_at_fill = ?,
+                spread_at_fill_pct = ?,
+                price_moved_pct = ?,
+                cancel_reason = ?,
+                status = 'cancelled'
+            WHERE order_id = ?
+        """
+        update_params = (
+            cancelled_ts,
+            time_alive_ms,
+            best_bid,
+            best_ask,
+            round(spread_pct, 4),
+            round(price_moved_pct, 4),
+            cancel_reason,
+            order_id
+        )
+        success = self._execute_with_retry(update_sql, update_params)
+        if success:
             logger.debug(f"Maker order cancelled: {order_id} | reason={cancel_reason}")
-        except Exception as e:
-            pass  # Silently ignore database lock errors
+        else:
+            logger.warning(f"Failed to update maker order cancelled: {order_id}")
 
     def update_maker_fill_model_validation(
         self,

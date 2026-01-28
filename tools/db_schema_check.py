@@ -26,6 +26,7 @@ from hft_system.db_migrations import (
     table_exists,
     get_table_columns
 )
+from hft_system.db import open_sqlite
 
 
 def check_data_integrity(conn):
@@ -172,7 +173,8 @@ def main():
     # Data integrity checks
     if not args.quiet:
         try:
-            conn = sqlite3.connect(str(db_path))
+            # Use bot-safe WAL mode and busy_timeout
+            conn = open_sqlite(str(db_path))
             check_data_integrity(conn)
             show_recent_activity(conn)
             conn.close()

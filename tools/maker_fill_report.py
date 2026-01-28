@@ -34,6 +34,7 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hft_system.symbol_utils import normalize_db_symbol
+from hft_system.db import open_sqlite
 
 
 @dataclass
@@ -567,8 +568,8 @@ Examples:
         print(f"ERROR: Database not found at {args.db}")
         return 1
 
-    # Connect
-    conn = sqlite3.connect(str(db_path))
+    # Connect with bot-safe WAL mode and busy_timeout
+    conn = open_sqlite(str(db_path))
 
     # Check if maker_order_telemetry table exists
     cursor = conn.cursor()

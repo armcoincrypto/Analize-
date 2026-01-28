@@ -22,9 +22,15 @@ Targets:
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+
+# Add parent dir for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from hft_system.db import open_sqlite
 
 
 def print_header(title: str):
@@ -374,7 +380,8 @@ def main():
     print(f"   Database: {db_path}")
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        # Connect with bot-safe WAL mode and busy_timeout
+        conn = open_sqlite(str(db_path))
 
         analyze_performance_by_cause(conn)
         analyze_mfe_mae_by_cause(conn)
