@@ -20,9 +20,15 @@ import argparse
 import sqlite3
 import subprocess
 import os
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Tuple
+
+# Add parent dir for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from hft_system.db import open_sqlite
 
 
 def print_header(title: str):
@@ -446,8 +452,8 @@ def main():
     if not args.no_logs:
         get_recent_logs(args.log, 100)
 
-    # Part 4: Connect to database
-    conn = sqlite3.connect(str(db_path))
+    # Part 4: Connect to database (bot-safe with WAL + busy_timeout)
+    conn = open_sqlite(str(db_path))
     conn.row_factory = sqlite3.Row
 
     try:

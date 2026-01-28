@@ -41,6 +41,7 @@ from .db_migrations import ensure_schema, check_schema, apply_migrations, REQUIR
 from .db import (
     open_sqlite,
     execute_with_retry,
+    execute_immediate,
     insert_with_retry,
     short_lived_connection,
     SafeTelemetryWriter

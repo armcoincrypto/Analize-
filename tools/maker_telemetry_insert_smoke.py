@@ -27,7 +27,7 @@ from pathlib import Path
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hft_system.db import open_sqlite, execute_with_retry, short_lived_connection
+from hft_system.db import open_sqlite, execute_with_retry, execute_immediate, short_lived_connection
 
 
 def run_smoke_test(db_path: str = "hft_trades.db", readonly: bool = False) -> bool:
@@ -115,7 +115,8 @@ def run_smoke_test(db_path: str = "hft_trades.db", readonly: bool = False) -> bo
                 print("[3/5] Skipping insert (readonly mode)...")
                 print("      SKIP: --readonly-check specified")
             else:
-                print("[3/5] Inserting test row with retry logic...")
+                print("[3/5] Inserting test row with BEGIN IMMEDIATE + retry...")
+                print("      (Will wait up to 10s if bot is writing, or fail with clear message)")
                 test_order_id = f"SMOKE_TEST_{uuid.uuid4().hex[:8]}"
                 test_ts = int(time.time() * 1000)
 
@@ -144,11 +145,17 @@ def run_smoke_test(db_path: str = "hft_trades.db", readonly: bool = False) -> bo
                     5
                 )
 
-                result = execute_with_retry(conn, sql, params)
-                if result:
+                # Use BEGIN IMMEDIATE to acquire write lock early and fail fast
+                success, message = execute_immediate(conn, sql, params, max_attempts=10, base_delay_ms=1000)
+                if success:
                     print(f"      PASS: Inserted order_id={test_order_id}")
+                    print(f"      {message}")
                 else:
-                    print("      FAIL: Insert failed after retries")
+                    print(f"      FAIL: {message}")
+                    if "writer still active" in message.lower():
+                        print("      HINT: Another process (likely the bot) has a write lock.")
+                        print("            This is expected if bot is actively writing.")
+                        print("            Try --readonly-check to verify table without writing.")
                     return False
 
             # 4. Read back test row (or any recent row in readonly mode)

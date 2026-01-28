@@ -35,6 +35,8 @@ from typing import Dict, List, Optional, Tuple
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from hft_system.db import open_sqlite
+
 try:
     import yaml
     YAML_AVAILABLE = True
@@ -605,7 +607,7 @@ Examples:
             avg_total_costs_pct=0.035,
         )
     else:
-        conn = sqlite3.connect(str(db_path))
+        conn = open_sqlite(str(db_path))
 
         champion_perf = get_strategy_performance(conn, champion_id, symbol, args.days)
         challenger_perf = get_strategy_performance(conn, challenger_id, symbol, args.days)

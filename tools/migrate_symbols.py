@@ -27,6 +27,7 @@ from typing import List, Tuple
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hft_system.symbol_utils import QUOTE_CURRENCIES, normalize_symbol
+from hft_system.db import open_sqlite
 
 
 # Tables that have a symbol column that should be migrated
@@ -213,7 +214,8 @@ Mode:     DRY-RUN (preview only - no changes will be made)
 
 """)
 
-    conn = sqlite3.connect(str(db_path))
+    # Connect (bot-safe with WAL + busy_timeout)
+    conn = open_sqlite(str(db_path))
 
     # Process each table
     total_tables = 0

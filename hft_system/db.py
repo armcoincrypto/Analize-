@@ -35,7 +35,8 @@ DEFAULT_RETRY_BASE_MS = 50  # Start with 50ms, exponential backoff
 def open_sqlite(
     path: str,
     busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
-    check_same_thread: bool = False
+    check_same_thread: bool = False,
+    isolation_level: str = None
 ) -> sqlite3.Connection:
     """
     Open SQLite connection with optimal settings for concurrent access.
@@ -43,13 +44,14 @@ def open_sqlite(
     Settings applied:
     - WAL journal mode (allows concurrent reads during writes)
     - NORMAL synchronous (good balance of safety and speed)
-    - Busy timeout (wait instead of failing on lock)
+    - Busy timeout (BOTH connect timeout AND pragma for full coverage)
     - Foreign keys enabled
 
     Args:
         path: Path to SQLite database file
         busy_timeout_ms: How long to wait on lock (default 10s)
         check_same_thread: If False, allow connection use across threads
+        isolation_level: Transaction isolation level (None = autocommit)
 
     Returns:
         sqlite3.Connection with optimal settings
@@ -57,20 +59,26 @@ def open_sqlite(
     conn = sqlite3.connect(
         path,
         check_same_thread=check_same_thread,
-        timeout=busy_timeout_ms / 1000.0  # timeout is in seconds
+        timeout=busy_timeout_ms / 1000.0,  # timeout param sets busy_timeout internally
+        isolation_level=isolation_level  # None = autocommit mode
     )
 
     # Apply pragmas for concurrent access
+    # Note: We set busy_timeout via PRAGMA too for explicit control
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
     cursor.execute("PRAGMA synchronous=NORMAL;")
     cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms};")
     cursor.execute("PRAGMA foreign_keys=ON;")
 
-    # Verify WAL mode was set
+    # Verify settings were applied
     result = cursor.execute("PRAGMA journal_mode;").fetchone()
     if result and result[0].lower() != 'wal':
         logger.warning(f"Could not set WAL mode, got: {result[0]}")
+
+    bt_result = cursor.execute("PRAGMA busy_timeout;").fetchone()
+    if bt_result and int(bt_result[0]) != busy_timeout_ms:
+        logger.warning(f"busy_timeout mismatch: expected {busy_timeout_ms}, got {bt_result[0]}")
 
     cursor.close()
     return conn
@@ -81,7 +89,8 @@ def execute_with_retry(
     sql: str,
     params: Tuple = (),
     max_attempts: int = DEFAULT_RETRY_ATTEMPTS,
-    base_delay_ms: int = DEFAULT_RETRY_BASE_MS
+    base_delay_ms: int = DEFAULT_RETRY_BASE_MS,
+    log_retries: bool = True
 ) -> Optional[sqlite3.Cursor]:
     """
     Execute SQL with exponential backoff retry on lock errors.
@@ -96,12 +105,14 @@ def execute_with_retry(
         params: Parameters for the SQL statement
         max_attempts: Maximum retry attempts
         base_delay_ms: Base delay in milliseconds (doubles each retry)
+        log_retries: If True, log each retry attempt
 
     Returns:
         Cursor if successful, None if all retries failed
     """
     last_error = None
     delay_ms = base_delay_ms
+    total_wait_ms = 0
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -114,6 +125,12 @@ def execute_with_retry(
             if "locked" in error_str or "busy" in error_str:
                 last_error = e
                 if attempt < max_attempts:
+                    total_wait_ms += delay_ms
+                    if log_retries:
+                        logger.info(
+                            f"SQLite lock retry: attempt {attempt}/{max_attempts}, "
+                            f"waiting {delay_ms}ms (total wait: {total_wait_ms}ms)"
+                        )
                     time.sleep(delay_ms / 1000.0)
                     delay_ms = min(delay_ms * 2, 2000)  # Cap at 2 seconds
                 continue
@@ -124,7 +141,8 @@ def execute_with_retry(
 
     # All retries exhausted
     logger.warning(
-        f"SQLite operation failed after {max_attempts} attempts: {last_error}"
+        f"SQLite operation failed after {max_attempts} attempts "
+        f"(total wait: {total_wait_ms}ms): {last_error}"
     )
     return None
 
@@ -154,6 +172,67 @@ def insert_with_retry(
 
     result = execute_with_retry(conn, sql, params, max_attempts)
     return result is not None
+
+
+def execute_immediate(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: Tuple = (),
+    max_attempts: int = DEFAULT_RETRY_ATTEMPTS,
+    base_delay_ms: int = DEFAULT_RETRY_BASE_MS
+) -> Tuple[bool, str]:
+    """
+    Execute SQL within a BEGIN IMMEDIATE transaction with retry.
+
+    BEGIN IMMEDIATE acquires a RESERVED lock immediately, failing fast
+    if another writer holds the lock (instead of waiting on each statement).
+
+    Args:
+        conn: SQLite connection
+        sql: SQL statement to execute
+        params: Parameters for the SQL statement
+        max_attempts: Maximum retry attempts
+        base_delay_ms: Base delay in milliseconds
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    last_error = None
+    delay_ms = base_delay_ms
+    total_wait_ms = 0
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            cursor = conn.cursor()
+            # BEGIN IMMEDIATE acquires write lock immediately
+            cursor.execute("BEGIN IMMEDIATE;")
+            try:
+                cursor.execute(sql, params)
+                cursor.execute("COMMIT;")
+                return (True, f"Success on attempt {attempt}")
+            except Exception as inner_e:
+                cursor.execute("ROLLBACK;")
+                raise inner_e
+        except sqlite3.OperationalError as e:
+            error_str = str(e).lower()
+            if "locked" in error_str or "busy" in error_str:
+                last_error = e
+                if attempt < max_attempts:
+                    total_wait_ms += delay_ms
+                    logger.info(
+                        f"BEGIN IMMEDIATE lock retry: attempt {attempt}/{max_attempts}, "
+                        f"waiting {delay_ms}ms (total wait: {total_wait_ms}ms)"
+                    )
+                    time.sleep(delay_ms / 1000.0)
+                    delay_ms = min(delay_ms * 2, 2000)
+                continue
+            else:
+                return (False, f"SQL error: {e}")
+        except Exception as e:
+            return (False, f"Unexpected error: {e}")
+
+    # All retries exhausted - another writer is still active
+    return (False, f"Writer still active after {max_attempts} attempts ({total_wait_ms}ms total wait): {last_error}")
 
 
 @contextmanager
