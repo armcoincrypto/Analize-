@@ -23,6 +23,7 @@ from .config import SYSTEM_CONFIG, COST_MODEL
 from .signal_engine import Signal, ConditionResult
 from .execution_engine import TradeResult, ExitResult
 from .risk_controller import RiskDecision
+from .symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -676,6 +677,9 @@ class TradeLogger:
     ):
         """Log a generated signal."""
         try:
+            # Normalize symbol to full format (e.g., XRP -> XRPUSDT)
+            normalized_symbol = normalize_symbol(signal.symbol)
+
             condition_details = json.dumps([
                 {
                     "name": c.name,
@@ -696,7 +700,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 signal.timestamp,
-                signal.symbol,
+                normalized_symbol,
                 signal.signal_type.value,
                 signal.conditions_met,
                 signal.confidence,
@@ -715,7 +719,9 @@ class TradeLogger:
     def log_trade_entry(self, result: TradeResult, signal: Signal, is_probe: bool = False, cause_class: str = "FULL"):
         """Log trade entry with cause policy tracking."""
         try:
-            trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"
+            # Normalize symbol to full format (e.g., XRP -> XRPUSDT) for consistent storage
+            normalized_symbol = normalize_symbol(result.symbol)
+            trade_id = result.order_id or f"{normalized_symbol}_{result.timestamp}"
 
             cursor = self.conn.cursor()
             cursor.execute("""
@@ -726,7 +732,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
             """, (
                 trade_id,
-                result.symbol,
+                normalized_symbol,
                 result.side,
                 result.entry_price,
                 result.quantity,
@@ -847,6 +853,7 @@ class TradeLogger:
     def log_market_snapshot(self, symbol: str, data: Dict):
         """Log periodic market snapshot."""
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO market_snapshots (
@@ -856,7 +863,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 data.get("price", 0),
                 data.get("price_change_60s", 0),
                 data.get("volume_spike", 0),
@@ -874,13 +881,14 @@ class TradeLogger:
     def log_tick(self, symbol: str, price: float, volume: float, is_buyer_maker: bool):
         """Log individual tick/trade data."""
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO tick_data (timestamp, symbol, price, volume, is_buyer_maker)
                 VALUES (?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 price,
                 volume,
                 1 if is_buyer_maker else 0
@@ -892,6 +900,7 @@ class TradeLogger:
     def log_orderbook_snapshot(self, symbol: str, data: Dict):
         """Log orderbook snapshot for microstructure analysis."""
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO orderbook_snapshots (
@@ -900,7 +909,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 data.get("best_bid", 0),
                 data.get("best_ask", 0),
                 data.get("bid_volume", 0),
@@ -914,6 +923,7 @@ class TradeLogger:
     def log_indicator_snapshot(self, symbol: str, data: Dict):
         """Log all indicator values for strategy analysis."""
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO indicator_snapshots (
@@ -922,7 +932,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 data.get("price", 0),
                 data.get("rsi", 0),
                 data.get("volume_spike", 0),
@@ -942,6 +952,7 @@ class TradeLogger:
         we can analyze which threshold (1/5, 2/5, 3/5, etc.) is optimal.
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             conditions_met = sum(1 for v in conditions.values() if v)
 
             if conditions_met >= 1:  # Log when at least 1 condition met
@@ -954,7 +965,7 @@ class TradeLogger:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     int(time.time() * 1000),
-                    symbol,
+                    normalized_symbol,
                     price,
                     conditions_met,
                     1 if conditions.get("price_movement", False) else 0,
@@ -1022,13 +1033,14 @@ class TradeLogger:
         is_buyer_maker=False means the seller was the maker (buyer was aggressor = buying pressure)
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO trade_flow (timestamp, symbol, price, quantity, is_buyer_maker, trade_value)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 price,
                 quantity,
                 1 if is_buyer_maker else 0,
@@ -1046,6 +1058,7 @@ class TradeLogger:
         Negative CVD = more selling pressure
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO cvd_snapshots (
@@ -1054,7 +1067,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 cvd_data.get("cvd_1m", 0),
                 cvd_data.get("cvd_5m", 0),
                 cvd_data.get("cvd_15m", 0),
@@ -1084,6 +1097,7 @@ class TradeLogger:
         - delta_1s, delta_3s: Short-term momentum
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO trade_entry_flow (
@@ -1097,7 +1111,7 @@ class TradeLogger:
                 trade_id,
                 snapshot_type,
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 trade_flow.get("aggressive_buy_vol", 0),
                 trade_flow.get("aggressive_sell_vol", 0),
                 trade_flow.get("trades_per_second", 0),
@@ -1170,6 +1184,7 @@ class TradeLogger:
             invalidation_reasons = ["ob_flip", "delta_negative", "spread_widen", "no_movement", "flow_neutral"]
             exited_by_invalidation = 1 if exit_reason.lower() in invalidation_reasons else 0
 
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO trade_quality_metrics (
@@ -1183,7 +1198,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade_id,
-                symbol,
+                normalized_symbol,
                 side,
                 entry_orderbook.get("imbalance", 0),
                 entry_orderbook.get("spread_pct", 0),
@@ -1273,6 +1288,7 @@ class TradeLogger:
             primary_cause = causes[0][0] if causes else "unknown"
             cause_strength = causes[0][1] if causes else 0
 
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO trade_causality (
@@ -1286,7 +1302,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade_id,
-                symbol,
+                normalized_symbol,
                 int(time.time() * 1000),
                 orderbook_data.get("bid1_price", 0),
                 orderbook_data.get("bid1_size", 0),
@@ -1401,8 +1417,10 @@ class TradeLogger:
         - real_edge_flag = 1 if edge_duration > historical median
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
+
             # Get historical median for this symbol
-            historical_median = self.get_historical_median_edge(symbol)
+            historical_median = self.get_historical_median_edge(normalized_symbol)
 
             # Determine if edge was real
             real_edge_flag = 1 if edge_duration_sec > historical_median else 0
@@ -1419,7 +1437,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade_id,
-                symbol,
+                normalized_symbol,
                 side,
                 seconds_to_max_favorable,
                 max_favorable_pct,
@@ -1846,6 +1864,7 @@ class TradeLogger:
         - news_spike: Sudden volume/volatility spike
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             with self._db_lock:  # Thread-safe database access
                 cursor = self.conn.cursor()
                 cursor.execute("""
@@ -1860,7 +1879,7 @@ class TradeLogger:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     int(time.time() * 1000),
-                    symbol,
+                    normalized_symbol,
                     metrics.get("volatility_1m", 0),
                     metrics.get("volatility_5m", 0),
                     metrics.get("volatility_ratio", 0),
@@ -1989,6 +2008,7 @@ class TradeLogger:
         - regime_avoided: Blocked due to bad regime
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO blocked_signals (
@@ -1999,7 +2019,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 signal_type,
                 entry_price,
                 block_reason,
@@ -2032,6 +2052,7 @@ class TradeLogger:
         RESEARCH_GATE: Log a signal blocked by winner gate for threshold analysis.
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO winner_gate_blocks (
@@ -2041,7 +2062,7 @@ class TradeLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
-                symbol,
+                normalized_symbol,
                 block_reason,
                 regime,
                 confidence_tier,
@@ -2178,6 +2199,7 @@ class TradeLogger:
         - is_probe_trade: True if this is a PROBE cause trade (0.10x size)
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             context_data = context_data or {}
             base_pct = (base_value / 10000) * 100  # Assume $10k capital
             final_pct = (final_value / 10000) * 100
@@ -2200,7 +2222,7 @@ class TradeLogger:
             """, (
                 int(time.time() * 1000),
                 trade_id,
-                symbol,
+                normalized_symbol,
                 round(base_pct, 4),
                 round(base_value, 2),
                 round(base_quantity, 6),
@@ -2345,6 +2367,7 @@ class TradeLogger:
         - Queue position estimate
         """
         try:
+            normalized_symbol = normalize_symbol(symbol)
             best_bid = market_data.get("best_bid", 0)
             best_ask = market_data.get("best_ask", 0)
             mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
@@ -2366,7 +2389,7 @@ class TradeLogger:
             """, (
                 order_id,
                 trade_id,
-                symbol,
+                normalized_symbol,
                 side,
                 limit_price,
                 quantity,

@@ -23,6 +23,11 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
+# Add parent dir for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from hft_system.symbol_utils import normalize_db_symbol
+
 
 def check_table_exists(conn: sqlite3.Connection, table: str) -> bool:
     """Check if a table exists."""
@@ -243,7 +248,9 @@ Examples:
     print(f"Using database: {db_path}")
 
     conn = sqlite3.connect(str(db_path))
-    success = run_smoke_test(conn, args.days, args.symbol)
+    # Normalize symbol for consistent DB queries
+    symbol = normalize_db_symbol(args.symbol) if args.symbol else None
+    success = run_smoke_test(conn, args.days, symbol)
     conn.close()
 
     return 0 if success else 1

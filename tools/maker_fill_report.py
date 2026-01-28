@@ -33,6 +33,8 @@ import json
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from hft_system.symbol_utils import normalize_db_symbol
+
 
 @dataclass
 class MakerFillStats:
@@ -525,12 +527,8 @@ def check_column_exists(conn: sqlite3.Connection, table: str, column: str) -> bo
     return column in columns
 
 
-def normalize_symbol(symbol: str) -> str:
-    """Normalize symbol for LIKE query (XRP -> XRP, XRPUSDT -> XRP)."""
-    symbol = symbol.upper()
-    if symbol.endswith("USDT"):
-        return symbol[:-4]
-    return symbol
+# normalize_symbol moved to hft_system/symbol_utils.py
+# Use normalize_db_symbol from shared module instead
 
 
 def main():
@@ -590,7 +588,7 @@ Examples:
     # Normalize symbol filter
     symbol = None
     if args.symbol:
-        symbol = normalize_symbol(args.symbol)
+        symbol = normalize_db_symbol(args.symbol)
         if not has_maker_symbol:
             print(f"WARNING: --symbol {args.symbol} specified but maker_order_telemetry table has no symbol column.")
             print("         Running global analysis (all symbols).")

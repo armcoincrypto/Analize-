@@ -39,6 +39,15 @@ from .execution_engine import (
 from .trade_logger import TradeLogger
 from .db_migrations import ensure_schema, check_schema, apply_migrations, REQUIRED_SCHEMA
 from .hft_bot import HFTBot
+from .symbol_utils import (
+    normalize_symbol,
+    normalize_db_symbol,
+    resolve_symbol,
+    split_symbol,
+    symbols_match,
+    build_symbol_filter,
+    QUOTE_CURRENCIES
+)
 
 __all__ = [
     "TradingMode",
@@ -71,5 +80,13 @@ __all__ = [
     "check_schema",
     "apply_migrations",
     "REQUIRED_SCHEMA",
-    "HFTBot"
+    "HFTBot",
+    # Symbol utilities
+    "normalize_symbol",
+    "normalize_db_symbol",
+    "resolve_symbol",
+    "split_symbol",
+    "symbols_match",
+    "build_symbol_filter",
+    "QUOTE_CURRENCIES"
 ]

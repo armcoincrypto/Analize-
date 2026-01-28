@@ -27,6 +27,8 @@ from dataclasses import dataclass
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from hft_system.symbol_utils import normalize_db_symbol
+
 
 @dataclass
 class RegimeStats:
@@ -647,12 +649,15 @@ Examples:
     # Connect
     conn = sqlite3.connect(str(db_path))
 
+    # Normalize symbol for consistent DB queries
+    symbol = normalize_db_symbol(args.symbol) if args.symbol else None
+
     # Get all stats
-    regime_stats = get_regime_stats(conn, args.symbol, args.days)
-    cause_stats = get_cause_stats(conn, args.symbol, args.days)
-    blocked_stats = get_blocked_signal_stats(conn, args.symbol, args.days)
-    exit_stats = get_exit_reason_stats(conn, args.symbol, args.days)
-    execution_stats = get_execution_mode_stats(conn, args.symbol, args.days)
+    regime_stats = get_regime_stats(conn, symbol, args.days)
+    cause_stats = get_cause_stats(conn, symbol, args.days)
+    blocked_stats = get_blocked_signal_stats(conn, symbol, args.days)
+    exit_stats = get_exit_reason_stats(conn, symbol, args.days)
+    execution_stats = get_execution_mode_stats(conn, symbol, args.days)
 
     # Generate recommendations
     recs = generate_recommendations(regime_stats, cause_stats, blocked_stats, exit_stats, execution_stats)

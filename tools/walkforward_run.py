@@ -48,6 +48,7 @@ from hft_system.research.walkforward import (
     WalkForwardResult3Way,
 )
 from hft_system.research.metrics import metrics_to_dict
+from hft_system.symbol_utils import resolve_symbol
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,40 +57,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def resolve_symbol(symbol: str, quote: str = "USDT") -> str:
-    """
-    Resolve symbol to Binance format.
-
-    Args:
-        symbol: Input symbol (e.g., "XRP", "XRPUSDT", "xrp")
-        quote: Quote currency to append if missing (default: "USDT")
-
-    Returns:
-        Resolved symbol (e.g., "XRPUSDT")
-
-    Examples:
-        >>> resolve_symbol("XRP")
-        'XRPUSDT'
-        >>> resolve_symbol("XRPUSDT")
-        'XRPUSDT'
-        >>> resolve_symbol("btc", "USDT")
-        'BTCUSDT'
-        >>> resolve_symbol("ETH", "BTC")
-        'ETHBTC'
-    """
-    symbol = symbol.upper().strip()
-    quote = quote.upper().strip()
-
-    # Remove common quote currencies to get base
-    for q in ["USDT", "BUSD", "BTC", "ETH", "BNB"]:
-        if symbol.endswith(q) and len(symbol) > len(q):
-            # Already has a quote currency
-            return symbol
-
-    # Append quote if not present
-    if not symbol.endswith(quote):
-        return symbol + quote
-    return symbol
+# resolve_symbol moved to hft_system/symbol_utils.py
+# Imported from shared module above
 
 
 def test_symbol_resolution():
