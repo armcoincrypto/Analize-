@@ -552,6 +552,8 @@ Examples:
     parser.add_argument("--grid", type=str, help="Parameter grid (e.g., 'tp=0.2,0.3,0.4; sl=0.1,0.15; tstop=30,60')")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--output-dir", default="reports", help="Output directory for CSV (default: reports)")
+    parser.add_argument("--cost-model", type=str, choices=["taker", "maker", "zero"], default="taker",
+                        help="Cost model: taker (0.165%%), maker (0.052%%), zero (0%%) (default: taker)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
     args = parser.parse_args()
 
@@ -608,6 +610,7 @@ Examples:
         split_info = f"TRAIN={args.train_days}d / TEST={args.test_days}d"
         mode_label = "2-WAY SPLIT (legacy)"
 
+    cost_info = {"taker": "taker (0.165%)", "maker": "maker (0.052%)", "zero": "zero (0%)"}
     print(f"""
 +======================================================================+
 |              WALK-FORWARD OPTIMIZATION                               |
@@ -616,6 +619,7 @@ Examples:
 | Period:       {start_date.date()} to {end_date.date():<40} |
 | Mode:         {mode_label:<52} |
 | Split:        {split_info:<52} |
+| Cost Model:   {cost_info.get(args.cost_model, args.cost_model):<52} |
 | Grid Size:    {param_grid.total_combinations()} parameter combinations{' ' * 32}|
 | Random Seed:  {args.seed:<52} |
 +======================================================================+
@@ -651,7 +655,8 @@ Examples:
                 final_test_days=args.final_test_days,
                 param_grid=param_grid,
                 random_seed=args.seed,
-                top_n_validate=args.top_n_validate
+                top_n_validate=args.top_n_validate,
+                cost_model=args.cost_model
             )
         else:
             result = walk_forward_run(
@@ -662,7 +667,8 @@ Examples:
                 train_days=args.train_days,
                 test_days=args.test_days,
                 param_grid=param_grid,
-                random_seed=args.seed
+                random_seed=args.seed,
+                cost_model=args.cost_model
             )
     except Exception as e:
         logger.error(f"Walk-forward failed: {e}")
