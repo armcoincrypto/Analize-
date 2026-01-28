@@ -132,6 +132,32 @@ class HFTBot:
         self.last_trade_times: dict = {}  # symbol -> timestamp of last trade
         self.hourly_trade_counts: dict = {}  # symbol -> {hour: count}
 
+        # ============================================================
+        # PROBE MODE: Ultra-relaxed paper mode for data collection
+        # ============================================================
+        # Enable via: HFT_PROBE_MODE=1 environment variable (paper only)
+        self.probe_mode = False
+        self.force_maker_in_paper = False
+        if self.research_mode:
+            import os
+            if os.environ.get("HFT_PROBE_MODE", "0") == "1":
+                self.probe_mode = True
+                WINNER_GATE.probe_mode = True
+                logger.info("=" * 60)
+                logger.info("PROBE_MODE: ENABLED (paper only)")
+                logger.info(f"  min_conditions={WINNER_GATE.probe_min_conditions}")
+                logger.info(f"  probe_size={WINNER_GATE.probe_size_multiplier}x")
+                logger.info("  regime overrides: low_vol_chop ALLOWED for probe")
+                logger.info("  relaxed: ob_unstable, delta_noise -> probe allowed")
+                logger.info("  expanded causes: ALL causes allowed for data collection")
+                logger.info("=" * 60)
+            if os.environ.get("HFT_FORCE_MAKER_PAPER", "0") == "1":
+                self.force_maker_in_paper = True
+                WINNER_GATE.force_maker_in_paper = True
+                COST_MODEL.force_maker_in_paper = True
+                COST_MODEL.execution_mode = "maker"
+                logger.info("MAKER_FORCED_PAPER: Always using maker path in paper mode")
+
         # REGIME HYSTERESIS: Stable regime classification
         # Prevents regime from flipping on every tick
         self.regime_raw: dict = {}  # symbol -> current raw regime detection
@@ -301,11 +327,23 @@ class HFTBot:
         """
         Check if a regime is allowed for a specific symbol.
 
-        Returns (is_allowed, block_reason or None)
+        Returns (is_allowed, block_reason or None, is_probe_trade)
 
+        PROBE MODE: Ultra-relaxed - only block news_spike and liquidity_vacuum.
         EXPLORATION MODE: In paper mode with exploration_mode=True, only block
         news_spike regime. All other regimes are allowed for data collection.
         """
+        # PROBE MODE: Ultra-relaxed for data collection (paper only)
+        if self.probe_mode and WINNER_GATE.probe_allow_low_vol_chop:
+            # Only hard-block dangerous regimes
+            if regime in ["news_spike", "liquidity_vacuum"]:
+                return False, f"regime={regime} blocked (probe mode)"
+            # Allow low_vol_chop explicitly for probe trades
+            if regime == "low_vol_chop":
+                return True, "probe_allowed"
+            # Allow all other regimes
+            return True, None
+
         # EXPLORATION MODE: Only block news_spike for maximum data collection
         if WINNER_GATE.exploration_mode and self.research_mode:
             if regime == "news_spike":
@@ -486,26 +524,68 @@ class HFTBot:
             return
 
         # TASK 11: Check no-trade zone before entry
+        is_probe_relaxed_block = False  # Track if this was a relaxed block in probe mode
         if self.enable_no_trade_zones:
             is_blocked, block_reason, block_details, market_conditions = \
                 self.ws_manager.detect_no_trade_zone(signal.symbol)
 
             if is_blocked:
-                logger.info(f"NO-TRADE ZONE: {signal.symbol} - {block_reason}: {block_details}")
-                self.trade_logger.log_blocked_signal(
-                    symbol=signal.symbol,
-                    signal_type=signal.signal_type.value,
-                    entry_price=signal.entry_price,
-                    block_reason=block_reason,
-                    block_details=block_details,
-                    market_conditions=market_conditions,
-                    regime=current_regime
-                )
-                self.signals_blocked += 1
-                # Track spread-related blocks for alarm
-                if "spread" in block_reason.lower():
-                    self._check_spread_alarm(signal.symbol)
-                return
+                # PROBE MODE: Relax some blocks for data collection
+                if self.probe_mode and block_reason in ["ob_unstable", "delta_noise"]:
+                    # Check if within relaxable thresholds
+                    can_relax = False
+                    if block_reason == "ob_unstable" and WINNER_GATE.probe_relax_ob_unstable:
+                        # Allow unless extreme (bid_ratio > 0.95 or < 0.05)
+                        bid_ratio = market_conditions.get("ob_volume_instability", 0)
+                        # instability = abs(bid_ratio - 0.5) * 2, so bid_ratio extreme at instability > 0.9
+                        if bid_ratio < 0.9:  # Not extreme
+                            can_relax = True
+                    elif block_reason == "delta_noise" and WINNER_GATE.probe_relax_delta_noise:
+                        # Allow unless variance > hard limit
+                        variance = market_conditions.get("delta_variance", 0)
+                        if variance < WINNER_GATE.probe_delta_variance_max:
+                            can_relax = True
+
+                    if can_relax:
+                        logger.info(
+                            f"PROBE_RELAX: {signal.symbol} - {block_reason} relaxed | "
+                            f"Will use probe_size={WINNER_GATE.probe_size_multiplier}x"
+                        )
+                        is_probe_relaxed_block = True
+                        # Don't return - allow the trade to continue with probe sizing
+                    else:
+                        # Still blocked even in probe mode
+                        logger.info(f"NO-TRADE ZONE: {signal.symbol} - {block_reason}: {block_details}")
+                        self.trade_logger.log_blocked_signal(
+                            symbol=signal.symbol,
+                            signal_type=signal.signal_type.value,
+                            entry_price=signal.entry_price,
+                            block_reason=block_reason,
+                            block_details=block_details,
+                            market_conditions=market_conditions,
+                            regime=current_regime
+                        )
+                        self.signals_blocked += 1
+                        if "spread" in block_reason.lower():
+                            self._check_spread_alarm(signal.symbol)
+                        return
+                else:
+                    # Normal blocking behavior
+                    logger.info(f"NO-TRADE ZONE: {signal.symbol} - {block_reason}: {block_details}")
+                    self.trade_logger.log_blocked_signal(
+                        symbol=signal.symbol,
+                        signal_type=signal.signal_type.value,
+                        entry_price=signal.entry_price,
+                        block_reason=block_reason,
+                        block_details=block_details,
+                        market_conditions=market_conditions,
+                        regime=current_regime
+                    )
+                    self.signals_blocked += 1
+                    # Track spread-related blocks for alarm
+                    if "spread" in block_reason.lower():
+                        self._check_spread_alarm(signal.symbol)
+                    return
 
         # Check risk
         risk_decision = self.risk_controller.check_risk(signal)
@@ -676,62 +756,79 @@ class HFTBot:
             # FULL: Known profitable causes - trade with normal size
             # PROBE: Unknown causes - trade with tiny size (0.10x) for evidence
             # BLOCK: Everything else
+            # PROBE_MODE: Allow ALL causes with probe sizing for data collection
             # ============================================================
             if WINNER_GATE.causality_filter_enabled:
                 primary_cause = self._determine_causality(signal, orderbook_data, trade_flow)
                 is_long = signal.signal_type.value.lower() == "long"
 
-                # Get cause lists based on signal direction
-                full_causes = WINNER_GATE.cause_full_allow_long if is_long else WINNER_GATE.cause_full_allow_short
-                probe_causes = WINNER_GATE.cause_probe_allow_long if is_long else WINNER_GATE.cause_probe_allow_short
-
-                # Determine cause class
-                is_full_cause = primary_cause in full_causes
-                is_probe_cause = primary_cause in probe_causes
-                is_unknown = primary_cause == "unknown"
-
-                # Check PROBE constraints
-                probe_allowed = False
-                probe_block_reason = ""
-                if is_probe_cause:
-                    # PROBE requires: Pocket B + maker mode + good microstructure
-                    if WINNER_GATE.probe_requires_pocket_b and pocket_id != "B":
-                        probe_block_reason = f"probe requires Pocket B, got {pocket_id}"
-                    elif WINNER_GATE.probe_requires_maker and COST_MODEL.execution_mode != "maker":
-                        probe_block_reason = f"probe requires maker mode"
+                # PROBE_MODE: Allow ALL causes for data collection
+                if self.probe_mode:
+                    if primary_cause in WINNER_GATE.probe_mode_allow_causes:
+                        self.current_cause_class[signal.symbol] = "PROBE_MODE"
+                        logger.info(
+                            f"CAUSE POLICY PASS [PROBE_MODE]: {signal.symbol} | cause={primary_cause} | "
+                            f"size={WINNER_GATE.probe_size_multiplier}x"
+                        )
                     else:
-                        probe_allowed = True
-
-                # Decision logic
-                if is_full_cause:
-                    # FULL: Normal trade
-                    self.current_cause_class[signal.symbol] = "FULL"
-                    logger.info(f"CAUSE POLICY PASS [FULL]: {signal.symbol} | cause={primary_cause}")
-                elif is_probe_cause and probe_allowed:
-                    # PROBE: Tiny size trade for evidence collection
-                    self.current_cause_class[signal.symbol] = "PROBE"
-                    logger.info(f"CAUSE POLICY PASS [PROBE]: {signal.symbol} | cause={primary_cause} | size={WINNER_GATE.probe_cause_size_multiplier}x")
+                        # Even unknown causes allowed in probe mode
+                        self.current_cause_class[signal.symbol] = "PROBE_MODE"
+                        logger.info(
+                            f"CAUSE POLICY PASS [PROBE_MODE]: {signal.symbol} | cause={primary_cause} (any allowed)"
+                        )
                 else:
-                    # BLOCK: Not allowed
-                    if is_probe_cause and not probe_allowed:
-                        gate_reason = f"probe_blocked: {probe_block_reason}"
-                    elif is_unknown and WINNER_GATE.block_unknown_cause:
-                        gate_reason = "unknown_cause_blocked"
-                    else:
-                        gate_reason = f"cause={primary_cause} not in FULL{full_causes} or PROBE{probe_causes}"
+                    # Normal cause policy
+                    # Get cause lists based on signal direction
+                    full_causes = WINNER_GATE.cause_full_allow_long if is_long else WINNER_GATE.cause_full_allow_short
+                    probe_causes = WINNER_GATE.cause_probe_allow_long if is_long else WINNER_GATE.cause_probe_allow_short
 
-                    logger.info(f"CAUSE POLICY BLOCK: {signal.symbol} - {gate_reason}")
-                    self.trade_logger.log_blocked_signal(
-                        symbol=signal.symbol,
-                        signal_type=signal.signal_type.value,
-                        entry_price=signal.entry_price,
-                        block_reason=f"cause_filtered:{primary_cause}",
-                        block_details=gate_reason,
-                        market_conditions=orderbook_data,
-                        regime=current_regime
-                    )
-                    self.signals_blocked += 1
-                    return
+                    # Determine cause class
+                    is_full_cause = primary_cause in full_causes
+                    is_probe_cause = primary_cause in probe_causes
+                    is_unknown = primary_cause == "unknown"
+
+                    # Check PROBE constraints
+                    probe_allowed = False
+                    probe_block_reason = ""
+                    if is_probe_cause:
+                        # PROBE requires: Pocket B + maker mode + good microstructure
+                        if WINNER_GATE.probe_requires_pocket_b and pocket_id != "B":
+                            probe_block_reason = f"probe requires Pocket B, got {pocket_id}"
+                        elif WINNER_GATE.probe_requires_maker and COST_MODEL.execution_mode != "maker":
+                            probe_block_reason = f"probe requires maker mode"
+                        else:
+                            probe_allowed = True
+
+                    # Decision logic
+                    if is_full_cause:
+                        # FULL: Normal trade
+                        self.current_cause_class[signal.symbol] = "FULL"
+                        logger.info(f"CAUSE POLICY PASS [FULL]: {signal.symbol} | cause={primary_cause}")
+                    elif is_probe_cause and probe_allowed:
+                        # PROBE: Tiny size trade for evidence collection
+                        self.current_cause_class[signal.symbol] = "PROBE"
+                        logger.info(f"CAUSE POLICY PASS [PROBE]: {signal.symbol} | cause={primary_cause} | size={WINNER_GATE.probe_cause_size_multiplier}x")
+                    else:
+                        # BLOCK: Not allowed
+                        if is_probe_cause and not probe_allowed:
+                            gate_reason = f"probe_blocked: {probe_block_reason}"
+                        elif is_unknown and WINNER_GATE.block_unknown_cause:
+                            gate_reason = "unknown_cause_blocked"
+                        else:
+                            gate_reason = f"cause={primary_cause} not in FULL{full_causes} or PROBE{probe_causes}"
+
+                        logger.info(f"CAUSE POLICY BLOCK: {signal.symbol} - {gate_reason}")
+                        self.trade_logger.log_blocked_signal(
+                            symbol=signal.symbol,
+                            signal_type=signal.signal_type.value,
+                            entry_price=signal.entry_price,
+                            block_reason=f"cause_filtered:{primary_cause}",
+                            block_details=gate_reason,
+                            market_conditions=orderbook_data,
+                            regime=current_regime
+                        )
+                        self.signals_blocked += 1
+                        return
 
         # ============================================================
         # PROFESSIONAL OPTION B - CONFIDENCE GATING (data-validated)
@@ -820,12 +917,22 @@ class HFTBot:
         # Apply PROBE sizing if cause class is PROBE (tiny size for evidence collection)
         cause_class = self.current_cause_class.get(signal.symbol, "FULL")
         is_probe_trade = (cause_class == "PROBE")
+        is_probe_mode_trade = (cause_class == "PROBE_MODE")
+
         if is_probe_trade:
             probe_mult = WINNER_GATE.probe_cause_size_multiplier
             risk_decision.position_size *= probe_mult
             risk_decision.position_value *= probe_mult
             risk_decision.size_adjustment_reason = f"PROBE({probe_mult}x): {risk_decision.size_adjustment_reason or 'cause needs evidence'}"
             logger.info(f"PROBE SIZING: {signal.symbol} | size reduced to {probe_mult}x for evidence collection")
+
+        # Apply PROBE_MODE sizing (ultra-small for data collection)
+        if is_probe_mode_trade or is_probe_relaxed_block:
+            probe_mode_mult = WINNER_GATE.probe_size_multiplier
+            risk_decision.position_size *= probe_mode_mult
+            risk_decision.position_value *= probe_mode_mult
+            risk_decision.size_adjustment_reason = f"PROBE_MODE({probe_mode_mult}x): {risk_decision.size_adjustment_reason or 'data collection'}"
+            logger.info(f"PROBE_MODE SIZING: {signal.symbol} | size reduced to {probe_mode_mult}x for data collection")
 
         # Apply EXPLORATION sizing for marginal trades (data collection)
         if is_exploration_trade:

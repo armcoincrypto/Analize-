@@ -32,11 +32,12 @@ strategies:
     description: "XRP momentum strategy with CVD and OB imbalance signals"
 
     # Market regimes where this strategy is allowed to trade
+    # NOTE: low_vol_chop allowed for paper mode data collection
     regimes_allowed:
       - high_vol_trend
       - mean_reversion
+      - low_vol_chop  # Allowed for paper probe mode
     regimes_blocked:
-      - low_vol_chop
       - liquidity_vacuum
       - news_spike
 
@@ -57,18 +58,18 @@ strategies:
         - unknown
       block_causes: []
 
-    # Strategy parameters
+    # Strategy parameters (relaxed for paper mode data collection)
     params:
       take_profit_pct: 0.20
       stop_loss_pct: 0.15
       time_stop_seconds: 90
-      min_conditions: 3
-      min_imbalance: 0.60
-      min_confidence: 0.6
+      min_conditions: 2  # Relaxed for data collection (was 3)
+      min_imbalance: 0.55  # Relaxed for data collection (was 0.60)
+      min_confidence: 0.5  # Relaxed for data collection (was 0.6)
 
     # Execution policy
     execution:
-      mode: auto  # taker | maker | auto
+      mode: maker  # Use maker for telemetry testing
       auto_maker_spread_threshold_bps: 2.0  # Use maker if spread <= 2 bps
       max_spread_bps: 5.0  # Block trades if spread > 5 bps
       maker_timeout_ms: 5000  # Cancel maker order after 5s
@@ -111,8 +112,8 @@ strategies:
     regimes_allowed:
       - high_vol_trend
       - mean_reversion
+      - low_vol_chop  # Allowed for paper probe mode
     regimes_blocked:
-      - low_vol_chop
       - liquidity_vacuum
       - news_spike
 
@@ -241,6 +242,82 @@ strategies:
       promotion_date: null
       notes: "New strategy in testing phase. Needs walk-forward validation."
 
+  # ---------------------------------------------------------------------------
+  # SUI Probe Strategy v1 (CHAMPION - Paper only)
+  # ---------------------------------------------------------------------------
+  # Relaxed strategy for paper mode data collection
+  # NOT for live trading - just to enable SUI trades for testing
+  sui_probe_v1:
+    symbol: SUIUSDT
+    status: champion
+    description: "SUI probe strategy for paper mode data collection"
+
+    # Allow all regimes except dangerous ones (for data collection)
+    regimes_allowed:
+      - high_vol_trend
+      - low_vol_chop
+      - mean_reversion
+    regimes_blocked:
+      - liquidity_vacuum
+      - news_spike
+
+    # Allow all causes (for data collection)
+    causes:
+      enabled:
+        - ob_bullish_imbalance
+        - ob_bearish_imbalance
+        - cvd_buy_pressure
+        - cvd_sell_pressure
+        - price_momentum_up
+        - price_momentum_down
+      disabled: []
+      probe_causes:
+        - unknown
+      block_causes: []
+
+    # Relaxed parameters (for data collection)
+    params:
+      take_profit_pct: 0.25
+      stop_loss_pct: 0.20
+      time_stop_seconds: 120
+      min_conditions: 2  # Relaxed for data collection
+      min_imbalance: 0.55  # Relaxed for data collection
+      min_confidence: 0.4  # Relaxed for data collection
+
+    # Maker execution for telemetry testing
+    execution:
+      mode: maker
+      auto_maker_spread_threshold_bps: 5.0
+      max_spread_bps: 10.0  # Relaxed
+      maker_timeout_ms: 5000
+      maker_price_offset_bps: 0.5
+
+    # Tiny risk (probe mode)
+    risk:
+      position_size_pct: 0.5  # Small position
+      max_positions: 1
+      max_daily_trades: 100  # High limit for data collection
+      max_daily_loss_pct: 5.0  # Relaxed for paper
+      max_drawdown_pct: 10.0  # Relaxed for paper
+      loss_streak_pause_trades: 10
+      loss_streak_pause_minutes: 10
+
+    # Metadata
+    metadata:
+      created_at: "2026-01-28T00:00:00Z"
+      updated_at: "2026-01-28T00:00:00Z"
+      commit_hash: "fd1bea9"
+      walkforward_run_id: null
+      final_test_pnl_pct: null
+      final_test_sharpe: null
+      final_test_win_rate: null
+      final_test_trades: null
+      stress_test_passed: false
+      stress_test_date: null
+      promotion_approved: false
+      promotion_date: null
+      notes: "Paper mode only - data collection strategy. NOT for live trading."
+
 
 # =============================================================================
 # CHAMPION/CHALLENGER ASSIGNMENTS
@@ -252,6 +329,12 @@ assignments:
     champion: xrp_momentum_v1
     challenger: xrp_momentum_v2
     last_comparison: "2026-01-27T00:00:00Z"
+    comparison_days: 7
+
+  SUIUSDT:
+    champion: sui_probe_v1
+    challenger: null
+    last_comparison: null
     comparison_days: 7
 
   BTCUSDT:

@@ -212,7 +212,17 @@ class ExecutionEngine:
         current_spread_pct = orderbook.spread if orderbook else 0.05
         execution_mode = COST_MODEL.get_effective_mode(current_spread_pct)
 
-        # Use maker execution if configured
+        # FORCE_MAKER_IN_PAPER: Always use maker path in paper mode for testing
+        if COST_MODEL.execution_mode == "maker" or (
+            hasattr(COST_MODEL, 'force_maker_in_paper') and COST_MODEL.force_maker_in_paper
+        ):
+            logger.info(
+                f"MAKER_FORCED_PAPER: {signal.symbol} {signal.signal_type.value} | "
+                f"spread_bps={current_spread_pct*100:.1f}"
+            )
+            return await self._paper_maker_entry(signal, risk_decision, is_cause_probe, orderbook)
+
+        # Use maker execution if auto mode decides maker
         if execution_mode == "maker":
             return await self._paper_maker_entry(signal, risk_decision, is_cause_probe, orderbook)
 

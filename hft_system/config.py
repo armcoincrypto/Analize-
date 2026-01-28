@@ -144,6 +144,10 @@ class CostModelConfig:
     maker_fill_probability: float = 0.70  # 70% chance of fill
     maker_wait_seconds: float = 1.0  # Wait time for limit order
 
+    # Force maker path in paper mode (for testing maker telemetry)
+    # Enable via: HFT_FORCE_MAKER_PAPER=1 environment variable
+    force_maker_in_paper: bool = False
+
     # Computed totals (for reference):
     # TAKER: 2*0.10 + 2*0.02 + 0.02 = 0.26% per round-trip
     # MAKER: 2*0.01 + 2*0.005 + 0.0 = 0.03% per round-trip
@@ -336,6 +340,26 @@ class WinnerGateConfig:
     exploration_mode: bool = True  # Relax gates for data collection
     exploration_min_size_multiplier: float = 0.10  # 10% size for exploration trades
 
+    # ============================================================
+    # PROBE MODE: Ultra-relaxed paper mode for data collection
+    # ============================================================
+    # Enable via: HFT_PROBE_MODE=1 environment variable
+    # Purpose: Generate enough trades to validate maker path, telemetry, etc.
+    # NEVER enable in LIVE mode - this is for paper testing only
+    probe_mode: bool = False  # Auto-enable if HFT_PROBE_MODE=1 in paper mode
+    probe_size_multiplier: float = 0.05  # 5% of normal size for probe trades
+    probe_min_conditions: int = 2  # Override min_conditions in probe mode
+    probe_allow_low_vol_chop: bool = True  # Allow low_vol_chop for probe trades
+
+    # PROBE relaxations: convert hard blocks to probe-allowed
+    probe_relax_ob_unstable: bool = True  # Allow ob_unstable unless extreme (>0.95 or <0.05)
+    probe_relax_delta_noise: bool = True  # Allow delta_noise unless variance > 1.5
+    probe_ob_extreme_threshold: float = 0.95  # Still block if bid_ratio > this or < (1 - this)
+    probe_delta_variance_max: float = 1.5  # Still block if delta variance > this
+
+    # Force maker path in paper mode (for testing maker telemetry)
+    force_maker_in_paper: bool = False  # Enable via HFT_FORCE_MAKER_PAPER=1
+
     # === POCKET A: PRIMARY (high_vol_trend - the proven edge) ===
     pocket_a_enabled: bool = True
     pocket_a_regimes: List[str] = field(default_factory=lambda: ["high_vol_trend"])
@@ -387,6 +411,14 @@ class WinnerGateConfig:
     probe_requires_maker: bool = True          # Only probe with maker mode (lower costs)
 
     block_unknown_cause: bool = True  # Block trades with no clear cause
+
+    # PROBE_MODE expanded causes (when probe_mode=True, allow these for data collection)
+    probe_mode_allow_causes: List[str] = field(default_factory=lambda: [
+        "cvd_buy_pressure", "cvd_sell_pressure",
+        "ob_bullish_imbalance", "ob_bearish_imbalance",
+        "price_momentum_up", "price_momentum_down",
+        "unknown"  # Allow unknown causes in probe mode for data collection
+    ])
 
     # === LEGACY SETTINGS (for backward compatibility) ===
     strict_mode: bool = True  # If True, only Pocket A in live mode
