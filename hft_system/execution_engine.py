@@ -28,11 +28,13 @@ Also monitors open positions every tick for exit opportunities.
 import asyncio
 import logging
 import time
+import uuid
+import random
 from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from .config import SYSTEM_CONFIG, TradingMode, get_asset_config
+from .config import SYSTEM_CONFIG, TradingMode, get_asset_config, COST_MODEL
 from .signal_engine import Signal, SignalType
 from .risk_controller import RiskController, Position, RiskDecision
 from .websocket_manager import WebSocketManager
@@ -100,11 +102,13 @@ class ExecutionEngine:
         self,
         ws_manager: WebSocketManager,
         risk_controller: RiskController,
-        mode: TradingMode = None
+        mode: TradingMode = None,
+        trade_logger = None
     ):
         self.ws = ws_manager
         self.risk = risk_controller
         self.mode = mode or SYSTEM_CONFIG.mode
+        self.trade_logger = trade_logger  # For maker order telemetry
 
         # Callbacks for logging
         self.on_trade: Optional[Callable[[TradeResult], None]] = None
@@ -203,6 +207,16 @@ class ExecutionEngine:
                            Skip the execution probe (0.25x) to avoid double-reduction.
                            PROBE cause already applied 0.10x in hft_bot.py.
         """
+        # Determine execution mode (taker vs maker)
+        orderbook = self.ws.get_orderbook(signal.symbol)
+        current_spread_pct = orderbook.spread if orderbook else 0.05
+        execution_mode = COST_MODEL.get_effective_mode(current_spread_pct)
+
+        # Use maker execution if configured
+        if execution_mode == "maker":
+            return await self._paper_maker_entry(signal, risk_decision, is_cause_probe, orderbook)
+
+        # === TAKER EXECUTION (default) ===
         # Simulate small slippage (0.01-0.03%)
         slippage = signal.entry_price * 0.0002  # 0.02% average
         if signal.signal_type == SignalType.LONG:
@@ -266,6 +280,178 @@ class ExecutionEngine:
         self.time_of_mfe[signal.symbol] = 0  # Will be set when MFE is updated
         self.time_of_ob_decay[signal.symbol] = 0  # Will be set when OB decays
         self.time_of_delta_flip[signal.symbol] = 0  # Will be set when delta flips
+        self.ob_decay_amount[signal.symbol] = 0
+
+        result = TradeResult(
+            success=True,
+            symbol=signal.symbol,
+            side=signal.signal_type.value,
+            entry_price=fill_price,
+            quantity=final_size,
+            timestamp=int(time.time() * 1000),
+            order_id=position.position_id
+        )
+
+        final_value = final_size * fill_price
+        logger.info(
+            f"PAPER ENTRY [{probe_label}]: {signal.symbol} {signal.signal_type.value} | "
+            f"Price: ${fill_price:.4f} | Qty: {final_size:.4f} | "
+            f"Value: ${final_value:.2f} (full: ${risk_decision.position_value:.2f})"
+        )
+
+        if self.on_trade:
+            self.on_trade(result)
+
+        return result
+
+    async def _paper_maker_entry(
+        self,
+        signal: Signal,
+        risk_decision: RiskDecision,
+        is_cause_probe: bool = False,
+        orderbook = None
+    ) -> TradeResult:
+        """Execute paper trade entry with maker (limit order) simulation.
+
+        Simulates posting a limit order, waiting for fill, and logging telemetry.
+        """
+        # Get order book data
+        if orderbook is None:
+            orderbook = self.ws.get_orderbook(signal.symbol)
+
+        best_bid = orderbook.best_bid if orderbook else signal.entry_price * 0.9999
+        best_ask = orderbook.best_ask if orderbook else signal.entry_price * 1.0001
+        mid_price = (best_bid + best_ask) / 2
+        spread_pct = ((best_ask - best_bid) / mid_price * 100) if mid_price > 0 else 0.02
+
+        # Calculate limit price with offset inside the spread
+        # For LONG: place bid slightly above best bid (inside spread)
+        # For SHORT: place ask slightly below best ask (inside spread)
+        offset_bps = 0.5  # Default 0.5 bps inside spread
+        if signal.signal_type == SignalType.LONG:
+            limit_price = best_bid + (best_ask - best_bid) * (offset_bps / 100)
+        else:
+            limit_price = best_ask - (best_ask - best_bid) * (offset_bps / 100)
+
+        # Generate order ID
+        order_id = f"MKR_{signal.symbol}_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
+
+        # Calculate position size (same logic as taker)
+        if is_cause_probe:
+            final_size = risk_decision.position_size
+            probe_label = "CAUSE_PROBE MAKER"
+            exec_multiplier = 1.0
+        else:
+            exec_multiplier = 0.25
+            final_size = risk_decision.position_size * exec_multiplier
+            probe_label = "EXEC_PROBE MAKER 0.25x"
+
+        min_size = risk_decision.position_size * 0.10 if not is_cause_probe else final_size
+        if final_size < min_size:
+            final_size = min_size
+
+        # Log maker order posted
+        market_data = {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid_price": mid_price,
+            "spread_pct": spread_pct,
+            "queue_position_estimate": 0  # Simplified
+        }
+        if self.trade_logger:
+            self.trade_logger.log_maker_order_posted(
+                order_id=order_id,
+                symbol=signal.symbol,
+                side=signal.signal_type.value,
+                limit_price=limit_price,
+                quantity=final_size,
+                market_data=market_data,
+                trade_id=f"{signal.symbol}_{int(time.time()*1000)}"
+            )
+
+        logger.info(
+            f"MAKER ORDER POSTED: {signal.symbol} {signal.signal_type.value} | "
+            f"Limit: ${limit_price:.6f} | Best bid/ask: ${best_bid:.6f}/${best_ask:.6f} | "
+            f"Spread: {spread_pct:.4f}%"
+        )
+
+        # Simulate wait for fill
+        wait_time_sec = COST_MODEL.maker_wait_seconds
+        fill_probability = COST_MODEL.maker_fill_probability
+
+        # Simulate fill check - random based on fill probability
+        # In real implementation, this would track price movement
+        await asyncio.sleep(min(wait_time_sec, 0.5))  # Don't actually wait full time in paper
+
+        filled = random.random() < fill_probability
+
+        if filled:
+            # Order filled - use limit price (no slippage for maker)
+            fill_price = limit_price
+
+            # Log maker order filled
+            if self.trade_logger:
+                self.trade_logger.log_maker_order_filled(
+                    order_id=order_id,
+                    filled_quantity=final_size,
+                    avg_fill_price=fill_price,
+                    market_data=market_data,
+                    price_crossed_limit=False,
+                    cross_depth_bps=0
+                )
+
+            logger.info(
+                f"MAKER ORDER FILLED: {order_id} @ ${fill_price:.6f} | "
+                f"Qty: {final_size:.4f}"
+            )
+        else:
+            # Order not filled - log cancellation and fall back to taker
+            if self.trade_logger:
+                self.trade_logger.log_maker_order_cancelled(
+                    order_id=order_id,
+                    cancel_reason="timeout_no_fill",
+                    market_data=market_data
+                )
+
+            logger.info(
+                f"MAKER ORDER CANCELLED (no fill): {order_id} | Falling back to taker"
+            )
+
+            # Fall back to taker execution
+            slippage = signal.entry_price * 0.0002
+            if signal.signal_type == SignalType.LONG:
+                fill_price = signal.entry_price + slippage
+            else:
+                fill_price = signal.entry_price - slippage
+            probe_label = probe_label.replace("MAKER", "MAKER->TAKER")
+
+        # Create position in risk controller
+        signal.entry_price = fill_price
+        position = self.risk.open_position(signal, final_size)
+
+        # Track probe state
+        self.is_probe_position[signal.symbol] = not is_cause_probe
+        self.probe_confirmed[signal.symbol] = is_cause_probe
+        self.probe_start_time[signal.symbol] = time.time()
+        self.applied_exec_multiplier = exec_multiplier if not is_cause_probe else 1.0
+
+        # Initialize MFE/MAE tracking
+        self.position_mfe[signal.symbol] = 0
+        self.position_mae[signal.symbol] = 0
+
+        # Capture entry conditions
+        trade_flow = self.ws.get_trade_flow(signal.symbol)
+        self.entry_spread[signal.symbol] = orderbook.spread if orderbook else 0
+        self.entry_imbalance[signal.symbol] = orderbook.imbalance_ratio if orderbook else 0.5
+        self.entry_delta[signal.symbol] = trade_flow.get("net_delta", 0) if trade_flow else 0
+        self.entry_price_check[signal.symbol] = fill_price
+        self.entry_check_time[signal.symbol] = 0
+
+        # Initialize edge tracking
+        self.entry_time[signal.symbol] = time.time()
+        self.time_of_mfe[signal.symbol] = 0
+        self.time_of_ob_decay[signal.symbol] = 0
+        self.time_of_delta_flip[signal.symbol] = 0
         self.ob_decay_amount[signal.symbol] = 0
 
         result = TradeResult(
@@ -459,31 +645,41 @@ class ExecutionEngine:
         trade_flow = self.ws.get_trade_flow(position.symbol)
 
         # 3. MICRO PROFIT: Exit with profit above costs if OB is weakening
-        # Threshold must be ABOVE round-trip costs (~0.26% taker) to be net profitable
-        # BUG FIX: was 0.05% which guaranteed loss after 0.20% costs
-        if 0.28 <= pnl_pct < config.take_profit_pct:
+        # ECONOMIC GUARDRAIL: Dynamically calculate required profit based on execution mode
+        # required_profit = max(min_profit_floor_pct, cost * min_profit_multiple_of_cost)
+        required_profit = COST_MODEL.get_required_profit_pct()
+        estimated_cost = COST_MODEL.get_total_round_trip_cost()
+
+        if pnl_pct > 0 and pnl_pct < config.take_profit_pct:
             if orderbook:
                 current_imbalance = orderbook.imbalance_ratio
                 entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)
 
+                # Check if OB is weakening (edge decaying)
+                ob_weakening = False
                 if position.side == SignalType.LONG:
-                    # For LONG: OB weakening = imbalance dropping toward 0.5
                     imbalance_drop = entry_imbalance - current_imbalance
-                    if imbalance_drop > 0.1:  # Lost 10%+ of bullish edge
-                        logger.info(
-                            f"{position.symbol} MICRO PROFIT: +{pnl_pct:.3f}% | "
-                            f"OB weakening {entry_imbalance:.1%} -> {current_imbalance:.1%}"
-                        )
-                        return ExitReason.MICRO_PROFIT
+                    ob_weakening = imbalance_drop > 0.1  # Lost 10%+ of bullish edge
                 else:
-                    # For SHORT: OB weakening = imbalance rising toward 0.5
                     imbalance_rise = current_imbalance - entry_imbalance
-                    if imbalance_rise > 0.1:  # Lost 10%+ of bearish edge
+                    ob_weakening = imbalance_rise > 0.1  # Lost 10%+ of bearish edge
+
+                if ob_weakening:
+                    # ECONOMIC GUARDRAIL: Only exit if profit clears costs
+                    if pnl_pct >= required_profit:
                         logger.info(
                             f"{position.symbol} MICRO PROFIT: +{pnl_pct:.3f}% | "
-                            f"OB weakening {entry_imbalance:.1%} -> {current_imbalance:.1%}"
+                            f"OB weakening {entry_imbalance:.1%} -> {current_imbalance:.1%} | "
+                            f"required={required_profit:.2f}% cost={estimated_cost:.2f}%"
                         )
                         return ExitReason.MICRO_PROFIT
+                    else:
+                        # Log skipped micro_profit - profit doesn't cover costs
+                        logger.debug(
+                            f"{position.symbol} MICRO_PROFIT_SKIPPED: target={pnl_pct:.3f}% "
+                            f"required={required_profit:.2f}% est_cost={estimated_cost:.2f}% | "
+                            f"OB weakening but waiting for higher profit"
+                        )
 
         # 4. OB Flip: Orderbook imbalance flipped against us
         if orderbook:

@@ -81,12 +81,13 @@ class HFTBot:
         self.ws_manager = WebSocketManager()
         self.risk_controller = RiskController(initial_capital=self.capital)
         self.signal_engine = SignalEngine(self.ws_manager)
+        self.trade_logger = TradeLogger()  # Create before ExecutionEngine for maker telemetry
         self.execution_engine = ExecutionEngine(
             self.ws_manager,
             self.risk_controller,
-            mode=self.mode
+            mode=self.mode,
+            trade_logger=self.trade_logger
         )
-        self.trade_logger = TradeLogger()
 
         # Wire up callbacks (don't use async callback for signal - handle in scan loop)
         self.execution_engine.on_trade = self._on_trade
@@ -144,6 +145,17 @@ class HFTBot:
 
         # CAUSE POLICY TRACKING: FULL vs PROBE classification
         self.current_cause_class: dict = {}  # symbol -> "FULL" or "PROBE"
+
+        # ============================================================
+        # STRATEGY REGISTRY LOADING
+        # ============================================================
+        # Load champion strategies from registry for each enabled symbol.
+        # Strategy-specific regimes override global defaults.
+        self.strategy_loader = StrategyLoader()
+        self.active_strategies: dict = {}  # symbol -> StrategyConfig
+        self.symbol_regimes_allowed: dict = {}  # symbol -> list of allowed regimes
+        self.symbol_regimes_blocked: dict = {}  # symbol -> list of blocked regimes
+        self._load_strategies_from_registry()
 
         # ============================================================
         # RUNTIME ALARMS: Monitoring and Safety Controls
@@ -210,10 +222,14 @@ class HFTBot:
         logger.info(f"  FLOW_NEUTRAL: DISABLED")
         logger.info(f"  CONFIRMATION_TIMEOUT: DISABLED")
 
-        # Regime configuration
+        # Regime configuration (per-symbol from registry)
         logger.info(f"REGIMES:")
-        logger.info(f"  Allowed: {', '.join(self.preferred_regimes)}")
-        logger.info(f"  Blocked: {', '.join(self.avoid_regimes)}")
+        for sym in SYSTEM_CONFIG.enabled_assets:
+            allowed = self.symbol_regimes_allowed.get(sym, self.preferred_regimes)
+            blocked = self.symbol_regimes_blocked.get(sym, self.avoid_regimes)
+            logger.info(f"  [{sym}] Allowed: {allowed}")
+            logger.info(f"  [{sym}] Blocked: {blocked}")
+        logger.info(f"  Global fallback blocked: {list(WINNER_GATE.blocked_regimes)}")
 
         # Confidence configuration - PROFESSIONAL OPTION B
         logger.info(f"CONFIDENCE GATING (Professional Option B):")
@@ -233,7 +249,85 @@ class HFTBot:
             logger.info(f"  Min Imbalance: {WINNER_GATE.min_imbalance}")
             logger.info(f"  Max Spread: {WINNER_GATE.max_spread_pct}%")
             logger.info(f"  Expected: Only trades in [high_vol_trend + imb>=0.75 + HIGH tier]")
+
+        # Exploration mode status
+        logger.info(f"EXPLORATION MODE:")
+        if WINNER_GATE.exploration_mode and self.research_mode:
+            logger.info(f"  Status: ENABLED (paper mode data collection)")
+            logger.info(f"  Relaxed gates: Allow LOW tier, all regimes except news_spike")
+            logger.info(f"  Size multiplier: {WINNER_GATE.exploration_min_size_multiplier}x for exploration trades")
+        else:
+            logger.info(f"  Status: DISABLED (strict filtering)")
         logger.info("=" * 60)
+
+    def _load_strategies_from_registry(self):
+        """
+        Load champion strategies from registry for each enabled symbol.
+
+        Strategy-specific regimes_allowed and regimes_blocked override
+        the hardcoded defaults and WINNER_GATE.blocked_regimes.
+        """
+        for symbol in SYSTEM_CONFIG.enabled_assets:
+            # Convert symbol to full format for registry lookup
+            full_symbol = f"{symbol}USDT" if not symbol.endswith("USDT") else symbol
+
+            strategy = self.strategy_loader.get_champion(full_symbol)
+            if strategy:
+                self.active_strategies[full_symbol] = strategy
+                self.active_strategies[symbol] = strategy  # Also store by short name
+
+                # Store strategy-specific regimes
+                if strategy.regimes_allowed:
+                    self.symbol_regimes_allowed[symbol] = strategy.regimes_allowed
+                    self.symbol_regimes_allowed[full_symbol] = strategy.regimes_allowed
+                    logger.info(f"REGISTRY [{symbol}]: regimes_allowed={strategy.regimes_allowed}")
+
+                if strategy.regimes_blocked:
+                    self.symbol_regimes_blocked[symbol] = strategy.regimes_blocked
+                    self.symbol_regimes_blocked[full_symbol] = strategy.regimes_blocked
+                    logger.info(f"REGISTRY [{symbol}]: regimes_blocked={strategy.regimes_blocked}")
+
+                # Apply strategy execution mode to cost model
+                if strategy.execution.mode and COST_MODEL.execution_mode != strategy.execution.mode:
+                    old_mode = COST_MODEL.execution_mode
+                    COST_MODEL.execution_mode = strategy.execution.mode
+                    logger.info(f"REGISTRY [{symbol}]: execution_mode={old_mode} -> {strategy.execution.mode}")
+
+                logger.info(f"REGISTRY [{symbol}]: Loaded champion strategy {strategy.strategy_id}")
+            else:
+                logger.info(f"REGISTRY [{symbol}]: No champion strategy found, using defaults")
+
+    def _is_regime_allowed_for_symbol(self, symbol: str, regime: str) -> tuple:
+        """
+        Check if a regime is allowed for a specific symbol.
+
+        Returns (is_allowed, block_reason or None)
+
+        EXPLORATION MODE: In paper mode with exploration_mode=True, only block
+        news_spike regime. All other regimes are allowed for data collection.
+        """
+        # EXPLORATION MODE: Only block news_spike for maximum data collection
+        if WINNER_GATE.exploration_mode and self.research_mode:
+            if regime == "news_spike":
+                return False, f"regime={regime} blocked (exploration mode)"
+            # Allow all other regimes in exploration mode
+            return True, None
+
+        # NORMAL MODE: Check strategy-specific blocked regimes first
+        blocked = self.symbol_regimes_blocked.get(symbol, [])
+        if regime in blocked:
+            return False, f"regime={regime} blocked by registry"
+
+        # Check strategy-specific allowed regimes
+        allowed = self.symbol_regimes_allowed.get(symbol, [])
+        if allowed and regime not in allowed:
+            return False, f"regime={regime} not in registry allowed list {allowed}"
+
+        # Fallback to global WINNER_GATE.blocked_regimes
+        if regime in WINNER_GATE.blocked_regimes:
+            return False, f"regime={regime} blocked by WINNER_GATE"
+
+        return True, None
 
     def _apply_regime_hysteresis(self, symbol: str, raw_regime: str) -> str:
         """
@@ -495,8 +589,14 @@ class HFTBot:
             if rate_limited:
                 gate_blocked = True
             else:
+                # === EARLY REGIME CHECK: Block if regime is not allowed for this symbol ===
+                regime_allowed, regime_block_reason = self._is_regime_allowed_for_symbol(symbol, current_regime)
+                if not regime_allowed:
+                    gate_blocked = True
+                    gate_reason = regime_block_reason
+
                 # === TRY POCKET A: high_vol_trend (primary edge) ===
-                if WINNER_GATE.pocket_a_enabled and current_regime in WINNER_GATE.pocket_a_regimes:
+                elif WINNER_GATE.pocket_a_enabled and current_regime in WINNER_GATE.pocket_a_regimes:
                     pocket_a_pass = (
                         tier_str in WINNER_GATE.pocket_a_tiers and
                         current_imbalance >= WINNER_GATE.pocket_a_min_imbalance and
@@ -536,10 +636,11 @@ class HFTBot:
                         else:
                             gate_reason = f"pocket_b: depth=${ob_depth:.0f} < ${WINNER_GATE.pocket_b_min_depth:.0f}"
 
-                # === NO POCKET MATCHED: Check if regime is blocked entirely ===
+                # === NO POCKET MATCHED: Check if regime is blocked ===
                 if gate_blocked and not gate_reason:
-                    if current_regime in WINNER_GATE.blocked_regimes:
-                        gate_reason = f"regime={current_regime} (blocked)"
+                    regime_allowed, regime_block_reason = self._is_regime_allowed_for_symbol(symbol, current_regime)
+                    if not regime_allowed:
+                        gate_reason = regime_block_reason
                     else:
                         gate_reason = f"regime={current_regime} (no pocket matches)"
 
@@ -650,20 +751,31 @@ class HFTBot:
         # Get daily PnL for MEDIUM tier decision
         daily_pnl = self.risk_controller.get_status()['capital']['daily_pnl']
 
-        # LOW confidence: Always blocked (14% win rate too low)
+        # Track if this is an exploration trade (for size reduction)
+        is_exploration_trade = False
+
+        # LOW confidence: Blocked in normal mode, allowed with tiny size in exploration mode
         if confidence.tier == ConfidenceTier.LOW:
-            logger.info(f"Signal SKIPPED: {signal.symbol} - LOW confidence={confidence.total_score:.0f} (disabled)")
-            self.trade_logger.log_blocked_signal(
-                symbol=signal.symbol,
-                signal_type=signal.signal_type.value,
-                entry_price=signal.entry_price,
-                block_reason="low_confidence_disabled",
-                block_details=f"LOW confidence tier disabled (14% win rate)",
-                market_conditions=orderbook_data,
-                regime=current_regime
-            )
-            self.signals_blocked += 1
-            return
+            if WINNER_GATE.exploration_mode and self.research_mode:
+                # EXPLORATION MODE: Allow LOW with tiny size for data collection
+                is_exploration_trade = True
+                logger.info(
+                    f"EXPLORATION TRADE: {signal.symbol} - LOW confidence={confidence.total_score:.0f} | "
+                    f"Size={WINNER_GATE.exploration_min_size_multiplier}x"
+                )
+            else:
+                logger.info(f"Signal SKIPPED: {signal.symbol} - LOW confidence={confidence.total_score:.0f} (disabled)")
+                self.trade_logger.log_blocked_signal(
+                    symbol=signal.symbol,
+                    signal_type=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    block_reason="low_confidence_disabled",
+                    block_details=f"LOW confidence tier disabled (14% win rate)",
+                    market_conditions=orderbook_data,
+                    regime=current_regime
+                )
+                self.signals_blocked += 1
+                return
 
         # MEDIUM confidence: CONTRACTION mode when PnL < 0
         # (Allowed at day start PnL=0, blocked after losses, allowed after wins)
@@ -714,6 +826,14 @@ class HFTBot:
             risk_decision.position_value *= probe_mult
             risk_decision.size_adjustment_reason = f"PROBE({probe_mult}x): {risk_decision.size_adjustment_reason or 'cause needs evidence'}"
             logger.info(f"PROBE SIZING: {signal.symbol} | size reduced to {probe_mult}x for evidence collection")
+
+        # Apply EXPLORATION sizing for marginal trades (data collection)
+        if is_exploration_trade:
+            explore_mult = WINNER_GATE.exploration_min_size_multiplier
+            risk_decision.position_size *= explore_mult
+            risk_decision.position_value *= explore_mult
+            risk_decision.size_adjustment_reason = f"EXPLORE({explore_mult}x): {risk_decision.size_adjustment_reason or 'data collection'}"
+            logger.info(f"EXPLORATION SIZING: {signal.symbol} | size reduced to {explore_mult}x for data collection")
 
         # Log signal
         self.trade_logger.log_signal(signal, risk_decision)

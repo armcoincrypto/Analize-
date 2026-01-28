@@ -573,12 +573,51 @@ def should_suggest_promotion(
 
     Returns:
         (should_suggest, reason, improvement_pct)
+
+    ECONOMICS CHECK: Refuses promotion if challenger's expected PnL doesn't cover costs.
+    Taker costs ~0.26%, maker costs ~0.05%. Strategy must be profitable AFTER costs.
     """
+    # =========================================================================
+    # ECONOMICS CHECK: Must be profitable after costs
+    # =========================================================================
+    challenger_meta = challenger.get("metadata", {})
+    challenger_exec = challenger.get("execution", {})
+
+    challenger_pnl = challenger_meta.get("final_test_pnl_pct", 0)
+    challenger_trades = challenger_meta.get("final_test_trades", 0)
+
+    # Estimate cost based on execution mode
+    exec_mode = challenger_exec.get("mode", "taker")
+    if exec_mode == "maker":
+        estimated_cost_per_trade_pct = 0.05  # ~0.05% for maker
+    else:
+        estimated_cost_per_trade_pct = 0.26  # ~0.26% for taker
+
+    # Calculate average PnL per trade (minimum required profit after costs: 0.05%)
+    min_pnl_after_costs = 0.05
+    if challenger_trades and challenger_trades > 0:
+        avg_pnl_per_trade = challenger_pnl / challenger_trades
+        pnl_after_costs = avg_pnl_per_trade - estimated_cost_per_trade_pct
+    else:
+        avg_pnl_per_trade = 0
+        pnl_after_costs = -estimated_cost_per_trade_pct  # No trades = no data = fail economics
+
+    # Refuse if economics are broken (loses money after costs)
+    if pnl_after_costs < min_pnl_after_costs:
+        reason = (
+            f"ECONOMICS BROKEN: avg_pnl={avg_pnl_per_trade:.3f}% - costs={estimated_cost_per_trade_pct:.3f}% = "
+            f"{pnl_after_costs:.3f}% (need >= {min_pnl_after_costs:.3f}%)"
+        )
+        logger.warning(f"[ECONOMICS] {reason}")
+        return False, reason, 0
+
+    # =========================================================================
+    # Check if there's no champion (first strategy)
+    # =========================================================================
     if not champion:
-        return True, "No current champion - challenger is candidate for first champion", 100.0
+        return True, "No current champion - challenger is economically viable candidate for first champion", 100.0
 
     champion_meta = champion.get("metadata", {})
-    challenger_meta = challenger.get("metadata", {})
 
     # Get key metrics
     champion_pnl = champion_meta.get("final_test_pnl_pct", 0)
@@ -601,7 +640,7 @@ def should_suggest_promotion(
     improvement = 0.6 * pnl_improvement + 0.4 * sharpe_improvement
 
     if improvement >= min_improvement:
-        return True, f"Challenger shows {improvement:.1f}% improvement - consider promotion", improvement
+        return True, f"Challenger shows {improvement:.1f}% improvement (economics OK: {pnl_after_costs:.3f}% net)", improvement
     else:
         return False, f"Challenger shows only {improvement:.1f}% improvement (need {min_improvement}%)", improvement
 

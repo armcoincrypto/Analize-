@@ -148,6 +148,26 @@ class CostModelConfig:
     # TAKER: 2*0.10 + 2*0.02 + 0.02 = 0.26% per round-trip
     # MAKER: 2*0.01 + 2*0.005 + 0.0 = 0.03% per round-trip
 
+    # === ECONOMIC GUARDRAIL ===
+    # Prevents exits where profit doesn't cover costs
+    # required_profit = max(min_profit_floor_pct, cost * min_profit_multiple)
+    min_profit_multiple_of_cost: float = 2.0  # Exit profit must be 2x the expected cost
+    min_profit_floor_pct: float = 0.20  # Absolute minimum profit % for any exit
+
+    def get_required_profit_pct(self, execution_mode: str = None) -> float:
+        """
+        Calculate minimum profit % required for a profitable exit.
+
+        Args:
+            execution_mode: "maker" or "taker" (defaults to current execution_mode)
+
+        Returns:
+            Minimum profit percentage required to exit
+        """
+        mode = execution_mode or self.execution_mode
+        cost = self.get_total_round_trip_cost(mode)
+        return max(self.min_profit_floor_pct, cost * self.min_profit_multiple_of_cost)
+
     @property
     def entry_fee_pct(self) -> float:
         """Get entry fee based on execution mode."""
@@ -309,6 +329,12 @@ class WinnerGateConfig:
 
     # RESEARCH_GATE: Relaxed settings for paper mode data collection
     research_mode: bool = True  # Auto-set based on SYSTEM_CONFIG.mode
+
+    # EXPLORATION MODE: Extremely relaxed gates for data collection
+    # Default True in paper mode - collects marginal trades for analysis
+    # Should be False in live mode for strict filtering
+    exploration_mode: bool = True  # Relax gates for data collection
+    exploration_min_size_multiplier: float = 0.10  # 10% size for exploration trades
 
     # === POCKET A: PRIMARY (high_vol_trend - the proven edge) ===
     pocket_a_enabled: bool = True
