@@ -375,8 +375,8 @@ class ExecutionEngine:
                 side=signal.signal_type.value,
                 limit_price=limit_price,
                 quantity=final_size,
-                market_data=market_data,
-                trade_id=f"{signal.symbol}_{int(time.time()*1000)}"
+                market_data=market_data
+                # trade_id is intentionally omitted - trade doesn't exist yet
             )
 
         logger.info(
