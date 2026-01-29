@@ -122,17 +122,16 @@ def run_smoke_test(db_path: str = "hft_trades.db", readonly: bool = False) -> bo
 
                 sql = """
                     INSERT INTO maker_order_telemetry (
-                        order_id, trade_id, symbol, side,
+                        order_id, symbol, side,
                         limit_price, quantity, order_type,
                         posted_ts,
                         best_bid_at_post, best_ask_at_post, spread_at_post_pct,
                         mid_price_at_post, queue_position_estimate,
                         status
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, 'pending')
+                    ) VALUES (?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, 'pending')
                 """
                 params = (
                     test_order_id,
-                    f"smoke_trade_{test_ts}",
                     "XRPUSDT",
                     "LONG",
                     2.5000,
