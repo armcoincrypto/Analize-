@@ -70,6 +70,7 @@ class TradeResult:
     timestamp: int
     order_id: str = ""
     error: str = ""
+    execution_mode: str = "taker"  # "maker" or "taker"
 
 
 @dataclass
@@ -299,7 +300,8 @@ class ExecutionEngine:
             entry_price=fill_price,
             quantity=final_size,
             timestamp=int(time.time() * 1000),
-            order_id=position.position_id
+            order_id=position.position_id,
+            execution_mode="taker"  # TAKER execution path
         )
 
         final_value = final_size * fill_price
@@ -470,6 +472,9 @@ class ExecutionEngine:
         self.time_of_delta_flip[signal.symbol] = 0
         self.ob_decay_amount[signal.symbol] = 0
 
+        # Determine execution mode based on whether order filled as maker or fell back to taker
+        actual_execution_mode = "maker" if filled else "taker"
+
         result = TradeResult(
             success=True,
             symbol=signal.symbol,
@@ -477,7 +482,8 @@ class ExecutionEngine:
             entry_price=fill_price,
             quantity=final_size,
             timestamp=int(time.time() * 1000),
-            order_id=position.position_id
+            order_id=position.position_id,
+            execution_mode=actual_execution_mode
         )
 
         final_value = final_size * fill_price

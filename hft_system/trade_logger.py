@@ -737,13 +737,16 @@ class TradeLogger:
             normalized_symbol = normalize_symbol(result.symbol)
             trade_id = result.order_id or f"{normalized_symbol}_{result.timestamp}"
 
+            # Get execution_mode from TradeResult (defaults to "taker" if not set)
+            execution_mode = getattr(result, 'execution_mode', 'taker')
+
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO trades (
                     trade_id, symbol, side, entry_price, quantity,
                     entry_time, conditions_met, signal_confidence, status,
-                    is_probe_cause, cause_class
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                    is_probe_cause, cause_class, execution_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
             """, (
                 trade_id,
                 normalized_symbol,
@@ -754,11 +757,12 @@ class TradeLogger:
                 signal.conditions_met,
                 signal.confidence,
                 1 if is_probe else 0,
-                cause_class
+                cause_class,
+                execution_mode
             ))
 
             self.conn.commit()
-            logger.debug(f"Trade entry logged: {trade_id} | probe={is_probe} | class={cause_class}")
+            logger.debug(f"Trade entry logged: {trade_id} | probe={is_probe} | class={cause_class} | mode={execution_mode}")
 
         except Exception as e:
             pass  # Silently ignore database lock errors
