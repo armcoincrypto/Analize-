@@ -158,6 +158,53 @@ class HFTBot:
                 COST_MODEL.execution_mode = "maker"
                 logger.info("MAKER_FORCED_PAPER: Always using maker path in paper mode")
 
+            # ============================================================
+            # RELAXED MODE: Slightly relaxed settings for more trades
+            # ============================================================
+            if os.environ.get("RELAXED_MODE", "0") == "1":
+                WINNER_GATE.relaxed_mode = True
+                logger.info("=" * 60)
+                logger.info("RELAXED_MODE: ENABLED (paper only)")
+
+                # Store original values for logging
+                orig_pocket_a_imb = WINNER_GATE.pocket_a_min_imbalance
+                orig_pocket_b_imb = WINNER_GATE.pocket_b_min_imbalance
+                orig_pocket_a_spread = WINNER_GATE.pocket_a_max_spread_pct
+                orig_pocket_b_spread = WINNER_GATE.pocket_b_max_spread_pct
+                orig_pocket_b_depth = WINNER_GATE.pocket_b_min_depth
+
+                # Apply relaxations
+                # 1. Reduce min imbalance by configured amount
+                imb_reduction = WINNER_GATE.relaxed_imbalance_reduction
+                WINNER_GATE.pocket_a_min_imbalance = max(0.50, orig_pocket_a_imb - imb_reduction)
+                WINNER_GATE.pocket_b_min_imbalance = max(0.50, orig_pocket_b_imb - imb_reduction)
+
+                # 2. Increase max spread by configured multiplier
+                spread_mult = WINNER_GATE.relaxed_spread_increase
+                WINNER_GATE.pocket_a_max_spread_pct = orig_pocket_a_spread * spread_mult
+                WINNER_GATE.pocket_b_max_spread_pct = orig_pocket_b_spread * spread_mult
+
+                # 3. Reduce min depth requirement
+                depth_mult = WINNER_GATE.relaxed_min_depth_reduction
+                WINNER_GATE.pocket_b_min_depth = orig_pocket_b_depth * depth_mult
+
+                # 4. Allow MEDIUM tier more broadly
+                if WINNER_GATE.relaxed_allow_medium_tier:
+                    if "medium" not in WINNER_GATE.pocket_a_tiers:
+                        WINNER_GATE.pocket_a_tiers.append("medium")
+                    if "medium" not in WINNER_GATE.pocket_b_tiers:
+                        WINNER_GATE.pocket_b_tiers.append("medium")
+
+                # Log all overrides
+                logger.info(f"  Pocket A imbalance: {orig_pocket_a_imb:.2f} -> {WINNER_GATE.pocket_a_min_imbalance:.2f}")
+                logger.info(f"  Pocket B imbalance: {orig_pocket_b_imb:.2f} -> {WINNER_GATE.pocket_b_min_imbalance:.2f}")
+                logger.info(f"  Pocket A max spread: {orig_pocket_a_spread:.4f}% -> {WINNER_GATE.pocket_a_max_spread_pct:.4f}%")
+                logger.info(f"  Pocket B max spread: {orig_pocket_b_spread:.4f}% -> {WINNER_GATE.pocket_b_max_spread_pct:.4f}%")
+                logger.info(f"  Pocket B min depth: ${orig_pocket_b_depth:.0f} -> ${WINNER_GATE.pocket_b_min_depth:.0f}")
+                logger.info(f"  Pocket A tiers: {WINNER_GATE.pocket_a_tiers}")
+                logger.info(f"  Pocket B tiers: {WINNER_GATE.pocket_b_tiers}")
+                logger.info("=" * 60)
+
         # REGIME HYSTERESIS: Stable regime classification
         # Prevents regime from flipping on every tick
         self.regime_raw: dict = {}  # symbol -> current raw regime detection
@@ -1684,6 +1731,135 @@ class HFTBot:
         logger.info("HFT bot stopped")
 
 
+def execute_force_paper_trade(trade_logger, symbol: str, execution_mode: str) -> bool:
+    """
+    Execute a forced paper trade for testing purposes.
+
+    Creates an entry trade row (status=open) then immediately closes it.
+    This is for testing reports and execution_mode persistence.
+
+    Args:
+        trade_logger: TradeLogger instance
+        symbol: Symbol to trade (e.g., "SUI", "SUIUSDT")
+        execution_mode: "maker" or "taker"
+
+    Returns:
+        True if successful, False otherwise
+    """
+    import time
+    import sqlite3
+    from .symbol_utils import normalize_symbol
+
+    # Normalize symbol
+    normalized_symbol = normalize_symbol(symbol)
+
+    # Generate trade_id
+    entry_time = int(time.time() * 1000)
+    trade_id = f"force_paper_{normalized_symbol}_{entry_time}"
+    exit_time = entry_time + 1000  # 1 second later
+
+    logger.info("=" * 60)
+    logger.info("FORCE_PAPER_TRADE: Executing synthetic trade")
+    logger.info(f"  symbol={normalized_symbol}")
+    logger.info(f"  mode={execution_mode}")
+    logger.info(f"  trade_id={trade_id}")
+    logger.info("=" * 60)
+
+    try:
+        conn = trade_logger.conn
+        cursor = conn.cursor()
+
+        # Insert entry trade (status=open)
+        cursor.execute("""
+            INSERT INTO trades (
+                trade_id, symbol, side, entry_price, quantity,
+                entry_time, conditions_met, signal_confidence, status,
+                is_probe_cause, cause_class, execution_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
+        """, (
+            trade_id,
+            normalized_symbol,
+            "long",  # Direction doesn't matter for test
+            1.0,     # Fake entry price
+            1.0,     # Fake quantity
+            entry_time,
+            3,       # conditions_met
+            0.8,     # signal_confidence
+            0,       # is_probe_cause
+            "FORCE_PAPER_TRADE",
+            execution_mode
+        ))
+
+        # Immediately close it
+        cursor.execute("""
+            UPDATE trades SET
+                exit_price = ?,
+                exit_time = ?,
+                pnl = ?,
+                pnl_pct = ?,
+                hold_time_sec = ?,
+                exit_reason = ?,
+                mfe = ?,
+                mae = ?,
+                entry_fee_pct = ?,
+                exit_fee_pct = ?,
+                fees_paid_pct = ?,
+                spread_cost_pct = ?,
+                slippage_pct = ?,
+                total_costs_pct = ?,
+                pnl_after_costs_pct = ?,
+                status = 'closed'
+            WHERE trade_id = ?
+        """, (
+            1.0,       # exit_price = entry_price (no PnL)
+            exit_time,
+            0.0,       # pnl = 0
+            0.0,       # pnl_pct = 0
+            1.0,       # hold_time_sec = 1
+            "force_paper_trade",  # exit_reason
+            0.0,       # mfe = 0
+            0.0,       # mae = 0
+            0.0,       # entry_fee_pct
+            0.0,       # exit_fee_pct
+            0.0,       # fees_paid_pct
+            0.0,       # spread_cost_pct
+            0.0,       # slippage_pct
+            0.0,       # total_costs_pct
+            0.0,       # pnl_after_costs_pct
+            trade_id
+        ))
+
+        conn.commit()
+
+        # Verify the trade was created correctly
+        cursor.execute("""
+            SELECT trade_id, symbol, status, execution_mode,
+                   datetime(entry_time/1000, 'unixepoch'),
+                   datetime(exit_time/1000, 'unixepoch'),
+                   exit_reason
+            FROM trades WHERE trade_id = ?
+        """, (trade_id,))
+        row = cursor.fetchone()
+
+        if row:
+            logger.info("FORCE_PAPER_TRADE: SUCCESS")
+            logger.info(f"  trade_id: {row[0]}")
+            logger.info(f"  symbol: {row[1]}")
+            logger.info(f"  status: {row[2]}")
+            logger.info(f"  execution_mode: {row[3]}")
+            logger.info(f"  entry_time: {row[4]}")
+            logger.info(f"  exit_time: {row[5]}")
+            logger.info(f"  exit_reason: {row[6]}")
+            return True
+        else:
+            logger.error("FORCE_PAPER_TRADE: Failed to verify trade creation")
+            return False
+
+    except Exception as e:
+        logger.error(f"FORCE_PAPER_TRADE: Error - {e}")
+        return False
+
+
 def load_strategy_file(strategy_path: str) -> dict:
     """
     Load and apply strategy from file.
@@ -1741,6 +1917,8 @@ def load_strategy_file(strategy_path: str) -> dict:
 
 def main():
     """Main entry point."""
+    import os
+
     parser = argparse.ArgumentParser(
         description="HFT Trading Bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1755,9 +1933,10 @@ Examples:
   # Use strategy from registry
   python -m hft_system.hft_bot --strategy-file strategies/generated_active.yml
 
-  # Generate strategy file first:
-  python tools/registry_apply.py --symbol XRPUSDT --apply
-  python -m hft_system.hft_bot --strategy-file strategies/generated_active.yml
+  # Force a paper trade for testing (paper mode only)
+  python -m hft_system.hft_bot --force-paper-trade SUI --mode maker --once
+  # Or via environment variables:
+  FORCE_PAPER_TRADE=SUI FORCE_EXECUTION_MODE=maker python -m hft_system.hft_bot --once
         """
     )
     parser.add_argument("--live", action="store_true", help="Run in live mode (default: paper)")
@@ -1765,9 +1944,54 @@ Examples:
     parser.add_argument("--strategy-file", type=str, default=None,
                         help="Path to strategy config file (YAML/JSON). "
                              "Can also set HFT_STRATEGY_FILE env var.")
+    parser.add_argument("--force-paper-trade", type=str, default=None, metavar="SYMBOL",
+                        help="Force a synthetic paper trade for testing. "
+                             "Creates entry+exit immediately. Paper mode only. "
+                             "Can also set FORCE_PAPER_TRADE env var.")
+    parser.add_argument("--mode", type=str, default=None, choices=["maker", "taker"],
+                        help="Execution mode for --force-paper-trade. "
+                             "Can also set FORCE_EXECUTION_MODE env var.")
+    parser.add_argument("--once", action="store_true",
+                        help="Exit after force-paper-trade (don't start bot loops)")
     args = parser.parse_args()
 
     mode = TradingMode.LIVE if args.live else TradingMode.PAPER
+
+    # ============================================================
+    # FORCE PAPER TRADE: Debug feature for testing reports
+    # ============================================================
+    # Check CLI args first, then environment variables
+    force_symbol = args.force_paper_trade or os.environ.get("FORCE_PAPER_TRADE")
+    force_mode = args.mode or os.environ.get("FORCE_EXECUTION_MODE", "taker")
+
+    if force_symbol:
+        # Safety check: Only allowed in paper mode
+        if mode == TradingMode.LIVE:
+            logger.error("FORCE_PAPER_TRADE: REFUSED - Cannot use in LIVE mode")
+            logger.error("  This feature is for paper mode testing only.")
+            sys.exit(1)
+
+        logger.info("=" * 60)
+        logger.info("FORCE_PAPER_TRADE MODE DETECTED")
+        logger.info(f"  Symbol: {force_symbol}")
+        logger.info(f"  Execution mode: {force_mode}")
+        logger.info("=" * 60)
+
+        # Initialize minimal components for DB write
+        from .db_migrations import ensure_schema
+        ensure_schema(SYSTEM_CONFIG.db_path, auto_migrate=True)
+
+        trade_logger = TradeLogger()
+
+        success = execute_force_paper_trade(trade_logger, force_symbol, force_mode)
+
+        trade_logger.close()
+
+        if args.once:
+            logger.info("--once flag set, exiting without starting bot loops")
+            sys.exit(0 if success else 1)
+
+        # Continue to normal bot startup if --once not set
 
     # Load strategy file if provided
     strategy_changes = load_strategy_file(args.strategy_file)

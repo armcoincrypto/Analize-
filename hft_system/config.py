@@ -341,6 +341,21 @@ class WinnerGateConfig:
     exploration_min_size_multiplier: float = 0.10  # 10% size for exploration trades
 
     # ============================================================
+    # RELAXED MODE: Slightly relaxed settings for paper testing
+    # ============================================================
+    # Enable via: RELAXED_MODE=1 environment variable (paper only)
+    # Purpose: Conservative relaxation of blockers to generate more trades
+    # while still maintaining some quality filtering.
+    # NEVER enable in LIVE mode - this is for paper testing only.
+    relaxed_mode: bool = False  # Auto-enable if RELAXED_MODE=1 in paper mode
+
+    # Relaxation amounts (applied as multipliers/additions to thresholds)
+    relaxed_imbalance_reduction: float = 0.10  # Reduce min_imbalance by 10%
+    relaxed_spread_increase: float = 1.25     # Allow 25% wider spreads
+    relaxed_allow_medium_tier: bool = True    # Allow MEDIUM tier in contraction mode
+    relaxed_min_depth_reduction: float = 0.50 # Reduce min_depth requirement by 50%
+
+    # ============================================================
     # PROBE MODE: Ultra-relaxed paper mode for data collection
     # ============================================================
     # Enable via: HFT_PROBE_MODE=1 environment variable

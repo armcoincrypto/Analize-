@@ -23,7 +23,15 @@ from datetime import datetime, timedelta
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hft_system.db import open_sqlite
+# Import directly to avoid triggering full hft_system imports
+import sqlite3
+
+def open_sqlite(db_path: str, isolation_level: str = None):
+    """Open SQLite connection with WAL mode and busy_timeout."""
+    conn = sqlite3.connect(db_path, isolation_level=isolation_level)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 
 
 def get_time_cutoff_ms(days: int) -> int:
@@ -154,7 +162,7 @@ def run_sanity_check(db_path: str, days: int = 1) -> bool:
     print("-" * 70)
 
     cursor.execute("""
-        SELECT order_id, symbol, side, status, posted_ts, filled_ts, cancelled_ts
+        SELECT order_id, symbol, side, posted_ts, filled_ts, cancelled_ts
         FROM maker_order_telemetry
         ORDER BY posted_ts DESC
         LIMIT 5
@@ -168,10 +176,10 @@ def run_sanity_check(db_path: str, days: int = 1) -> bool:
             order_id = (row[0] or "NULL")[:24]
             symbol = row[1] or "NULL"
             side = row[2] or "NULL"
-            # Determine status from timestamps
-            if row[5]:  # filled_ts
+            # Determine status from timestamps (row[3]=posted_ts, row[4]=filled_ts, row[5]=cancelled_ts)
+            if row[4]:  # filled_ts
                 status = "filled"
-            elif row[6]:  # cancelled_ts
+            elif row[5]:  # cancelled_ts
                 status = "cancelled"
             else:
                 status = "pending"

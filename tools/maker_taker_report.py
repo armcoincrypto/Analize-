@@ -31,7 +31,13 @@ from typing import Dict, List, Optional, Tuple
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hft_system.db import open_sqlite
+# Import directly to avoid triggering full hft_system imports
+def open_sqlite(db_path: str, isolation_level: str = None):
+    """Open SQLite connection with WAL mode and busy_timeout."""
+    conn = sqlite3.connect(db_path, isolation_level=isolation_level)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 
 # Global debug flag
 DEBUG_SQL = False

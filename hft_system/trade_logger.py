@@ -811,6 +811,8 @@ class TradeLogger:
                 execution_mode = "taker"
 
             # Update trade with exit info and costs
+            # NOTE: Do NOT overwrite execution_mode - it was set correctly at entry
+            # Only set execution_mode if it's NULL (backward compatibility)
             cursor.execute("""
                 UPDATE trades SET
                     exit_price = ?,
@@ -829,7 +831,7 @@ class TradeLogger:
                     total_costs_pct = ?,
                     pnl_after_costs_pct = ?,
                     pocket_id = ?,
-                    execution_mode = ?,
+                    execution_mode = COALESCE(execution_mode, ?),
                     status = 'closed'
                 WHERE symbol = ? AND status = 'open'
             """, (
