@@ -42,6 +42,21 @@ def get_blocked_signals_stats(conn: sqlite3.Connection, cutoff_ms: int, symbol: 
     """Get stats from blocked_signals table."""
     cursor = conn.cursor()
 
+    # Check if table exists
+    cursor.execute("""
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='blocked_signals'
+    """)
+    if not cursor.fetchone():
+        return {"total": 0, "by_reason": {}, "by_gate_name": {}, "by_gate_param": {},
+                "by_symbol": {}, "by_regime": {}}
+
+    # Check which columns exist (for backward compatibility)
+    cursor.execute("PRAGMA table_info(blocked_signals)")
+    columns = {row[1] for row in cursor.fetchall()}
+    has_gate_name = "gate_name" in columns
+    has_gate_param = "gate_param" in columns
+
     symbol_filter = ""
     params = [cutoff_ms]
     if symbol:
@@ -65,27 +80,31 @@ def get_blocked_signals_stats(conn: sqlite3.Connection, cutoff_ms: int, symbol: 
     """, params)
     by_reason = {row[0]: row[1] for row in cursor.fetchall()}
 
-    # By gate_name (if populated)
-    cursor.execute(f"""
-        SELECT gate_name, COUNT(*) as count
-        FROM blocked_signals
-        WHERE timestamp >= ? {symbol_filter}
-        AND gate_name IS NOT NULL
-        GROUP BY gate_name
-        ORDER BY count DESC
-    """, params)
-    by_gate_name = {row[0]: row[1] for row in cursor.fetchall()}
+    # By gate_name (if column exists and populated)
+    by_gate_name = {}
+    if has_gate_name:
+        cursor.execute(f"""
+            SELECT gate_name, COUNT(*) as count
+            FROM blocked_signals
+            WHERE timestamp >= ? {symbol_filter}
+            AND gate_name IS NOT NULL
+            GROUP BY gate_name
+            ORDER BY count DESC
+        """, params)
+        by_gate_name = {row[0]: row[1] for row in cursor.fetchall()}
 
-    # By gate_param (if populated)
-    cursor.execute(f"""
-        SELECT gate_param, COUNT(*) as count
-        FROM blocked_signals
-        WHERE timestamp >= ? {symbol_filter}
-        AND gate_param IS NOT NULL
-        GROUP BY gate_param
-        ORDER BY count DESC
-    """, params)
-    by_gate_param = {row[0]: row[1] for row in cursor.fetchall()}
+    # By gate_param (if column exists and populated)
+    by_gate_param = {}
+    if has_gate_param:
+        cursor.execute(f"""
+            SELECT gate_param, COUNT(*) as count
+            FROM blocked_signals
+            WHERE timestamp >= ? {symbol_filter}
+            AND gate_param IS NOT NULL
+            GROUP BY gate_param
+            ORDER BY count DESC
+        """, params)
+        by_gate_param = {row[0]: row[1] for row in cursor.fetchall()}
 
     # By symbol
     cursor.execute(f"""
