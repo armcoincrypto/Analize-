@@ -122,18 +122,19 @@ def run_sanity_check(db_path: str, days: int = 1) -> bool:
     trades_closed = cursor.fetchone()[0]
     print(f"  Total closed:     {trades_closed}")
 
-    # Trades by execution_mode
+    # Trades by execution_mode (excluding synthetic test trades)
     cursor.execute("""
         SELECT
             COALESCE(execution_mode, 'NULL/taker') as mode,
             COUNT(*) as count
         FROM trades
         WHERE entry_time >= ?
+        AND COALESCE(exit_reason, '') != 'force_paper_trade'
         GROUP BY execution_mode
         ORDER BY count DESC
     """, (cutoff_ms,))
     rows = cursor.fetchall()
-    print(f"\n  By execution_mode (in range):")
+    print(f"\n  By execution_mode (in range, excl. synthetic):")
     for row in rows:
         print(f"    {row[0]}: {row[1]}")
 
@@ -143,13 +144,27 @@ def run_sanity_check(db_path: str, days: int = 1) -> bool:
     print(" 3. CROSS-CHECK")
     print("-" * 70)
 
-    # Count maker trades in trades table
+    # Count maker trades in trades table (EXCLUDING synthetic test trades)
     cursor.execute("""
         SELECT COUNT(*) FROM trades
-        WHERE execution_mode = 'maker' AND entry_time >= ?
+        WHERE execution_mode = 'maker'
+        AND entry_time >= ?
+        AND COALESCE(exit_reason, '') != 'force_paper_trade'
     """, (cutoff_ms,))
     maker_trades = cursor.fetchone()[0]
+
+    # Also count synthetic trades separately for visibility
+    cursor.execute("""
+        SELECT COUNT(*) FROM trades
+        WHERE execution_mode = 'maker'
+        AND entry_time >= ?
+        AND exit_reason = 'force_paper_trade'
+    """, (cutoff_ms,))
+    synthetic_maker_trades = cursor.fetchone()[0]
+
     print(f"  Maker trades in trades table:     {maker_trades}")
+    if synthetic_maker_trades > 0:
+        print(f"    (excluded {synthetic_maker_trades} synthetic test trades)")
     print(f"  Maker orders in telemetry:        {maker_telemetry_count}")
 
     if maker_trades > filled:

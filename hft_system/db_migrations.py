@@ -98,6 +98,17 @@ REQUIRED_SCHEMA: Dict[str, List[Tuple[str, str, str]]] = {
         ("block_details", "TEXT", None),
         ("regime", "TEXT", None),
         ("would_have_pnl", "REAL", None),
+        # Market conditions at block time
+        ("spread_pct", "REAL", None),
+        ("spread_change_1s", "REAL", None),
+        ("delta_variance", "REAL", None),
+        ("ob_volume_instability", "REAL", None),
+        ("liquidity_depth", "REAL", None),
+        # Structured blocker tracking (for 80/20 analysis)
+        ("gate_name", "TEXT", None),  # e.g., "WINNER_GATE", "NO_TRADE_ZONE", "CONFIDENCE"
+        ("gate_param", "TEXT", None),  # e.g., "pocket_a_min_imbalance", "max_spread_pct"
+        ("gate_threshold", "REAL", None),  # threshold value that blocked
+        ("actual_value", "REAL", None),  # actual value that failed check
     ],
     "position_sizing": [
         ("timestamp", "INTEGER", None),

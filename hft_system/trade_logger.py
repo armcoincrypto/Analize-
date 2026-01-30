@@ -2015,7 +2015,11 @@ class TradeLogger:
         block_reason: str,
         block_details: str,
         market_conditions: dict,
-        regime: str = "unknown"
+        regime: str = "unknown",
+        gate_name: str = None,
+        gate_param: str = None,
+        gate_threshold: float = None,
+        actual_value: float = None
     ):
         """
         TASK 11: Log a signal that was blocked by no-trade zone detection.
@@ -2026,6 +2030,12 @@ class TradeLogger:
         - ob_unstable: Top5 OB volume unstable
         - low_liquidity: Depth below minimum threshold
         - regime_avoided: Blocked due to bad regime
+
+        Structured blocker fields (for 80/20 analysis):
+        - gate_name: Which gate blocked (WINNER_GATE, NO_TRADE_ZONE, CONFIDENCE, etc.)
+        - gate_param: Which parameter blocked (pocket_a_min_imbalance, max_spread_pct, etc.)
+        - gate_threshold: The threshold value that blocked
+        - actual_value: The actual value that failed the check
         """
         try:
             normalized_symbol = normalize_symbol(symbol)
@@ -2035,8 +2045,9 @@ class TradeLogger:
                     timestamp, symbol, signal_type, entry_price,
                     block_reason, block_details,
                     spread_pct, spread_change_1s, delta_variance,
-                    ob_volume_instability, liquidity_depth, regime
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ob_volume_instability, liquidity_depth, regime,
+                    gate_name, gate_param, gate_threshold, actual_value
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(time.time() * 1000),
                 normalized_symbol,
@@ -2049,10 +2060,14 @@ class TradeLogger:
                 market_conditions.get("delta_variance", 0),
                 market_conditions.get("ob_volume_instability", 0),
                 market_conditions.get("liquidity_depth", 0),
-                regime
+                regime,
+                gate_name,
+                gate_param,
+                gate_threshold,
+                actual_value
             ))
             self.conn.commit()
-            logger.debug(f"Blocked signal logged: {symbol} - {block_reason}")
+            logger.debug(f"Blocked signal logged: {symbol} - {block_reason} ({gate_name}:{gate_param})")
         except Exception as e:
             pass  # Silently ignore database lock errors
 
