@@ -34,7 +34,7 @@ import signal
 import sys
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .config import SYSTEM_CONFIG, ASSETS, TradingMode, get_asset_config, WINNER_GATE, COST_MODEL, REGIME_HYSTERESIS, RUNTIME_ALARMS
 from .websocket_manager import WebSocketManager
@@ -270,7 +270,7 @@ class HFTBot:
                                                 stderr=subprocess.DEVNULL).decode().strip()
         except:
             git_hash = "unknown"
-        deploy_time = int(datetime.utcnow().timestamp() * 1000)
+        deploy_time = int(datetime.now(timezone.utc).timestamp() * 1000)
         enabled_exits = "take_profit,micro_profit,ob_flip,spread_widen,time_stop,stop_loss"
         gate_status = f"winner_gate={'ON' if WINNER_GATE.enabled else 'OFF'}"
         if WINNER_GATE.enabled:
