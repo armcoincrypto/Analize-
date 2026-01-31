@@ -60,6 +60,10 @@ REQUIRED_SCHEMA: Dict[str, List[Tuple[str, str, str]]] = {
         # Regime at entry/exit
         ("regime_at_entry", "TEXT", None),
         ("regime_at_exit", "TEXT", None),
+        # Experiment tag for strategy leaderboard grouping
+        # Format: symbol|regime|pocket|tier|probe_relaxed_flags|execution_mode
+        # Example: "XRPUSDT|low_vol_chop|B|medium|ob_unstable|maker"
+        ("experiment_tag", "TEXT", None),
     ],
     "trade_causality": [
         ("trade_id", "TEXT", None),

@@ -140,15 +140,32 @@ class HFTBot:
         self.force_maker_in_paper = False
         if self.research_mode:
             import os
+            # ============================================================
+            # PAPER RATE LIMIT OVERRIDE
+            # ============================================================
+            # Default: 6/hr for LIVE, 20/hr for paper/probe (via env override)
+            paper_rate_limit = int(os.environ.get("PAPER_MAX_TRADES_PER_HOUR", str(WINNER_GATE.paper_max_trades_per_hour)))
+            orig_rate_limit = WINNER_GATE.max_trades_per_symbol_per_hour
+            WINNER_GATE.max_trades_per_symbol_per_hour = paper_rate_limit
+            # Also relax cooldown in paper mode
+            orig_cooldown = WINNER_GATE.min_seconds_between_trades_per_symbol
+            WINNER_GATE.min_seconds_between_trades_per_symbol = WINNER_GATE.paper_min_seconds_between_trades
+            logger.info(f"PAPER_RATE_LIMIT: {orig_rate_limit}/hr -> {paper_rate_limit}/hr (PAPER_MAX_TRADES_PER_HOUR)")
+            logger.info(f"PAPER_COOLDOWN: {orig_cooldown}s -> {WINNER_GATE.min_seconds_between_trades_per_symbol}s")
+
             if os.environ.get("HFT_PROBE_MODE", "0") == "1":
                 self.probe_mode = True
                 WINNER_GATE.probe_mode = True
                 logger.info("=" * 60)
                 logger.info("PROBE_MODE: ENABLED (paper only)")
+                logger.info(f"  rate_limit={WINNER_GATE.max_trades_per_symbol_per_hour}/hr")
+                logger.info(f"  cooldown={WINNER_GATE.min_seconds_between_trades_per_symbol}s")
                 logger.info(f"  min_conditions={WINNER_GATE.probe_min_conditions}")
                 logger.info(f"  probe_size={WINNER_GATE.probe_size_multiplier}x")
+                logger.info(f"  low_tier_allowed={WINNER_GATE.probe_allow_low_tier} (size={WINNER_GATE.probe_low_tier_size_mult}x)")
+                logger.info(f"  graded_ob_unstable={WINNER_GATE.probe_graded_ob_unstable} (size={WINNER_GATE.probe_ob_unstable_size_mult}x)")
+                logger.info(f"  graded_delta_noise={WINNER_GATE.probe_graded_delta_noise} (size={WINNER_GATE.probe_delta_noise_size_mult}x)")
                 logger.info("  regime overrides: low_vol_chop ALLOWED for probe")
-                logger.info("  relaxed: ob_unstable, delta_noise -> probe allowed")
                 logger.info("  expanded causes: ALL causes allowed for data collection")
                 logger.info("=" * 60)
             if os.environ.get("HFT_FORCE_MAKER_PAPER", "0") == "1":
@@ -571,35 +588,43 @@ class HFTBot:
             return
 
         # TASK 11: Check no-trade zone before entry
-        is_probe_relaxed_block = False  # Track if this was a relaxed block in probe mode
+        # Track probe relaxation reasons for experiment_tag
+        is_probe_relaxed_block = False
+        probe_relaxed_reason = None  # "ob_unstable" or "delta_noise"
+        probe_size_penalty = 1.0  # Multiplier to apply to probe size (1.0 = no penalty)
         if self.enable_no_trade_zones:
             is_blocked, block_reason, block_details, market_conditions = \
                 self.ws_manager.detect_no_trade_zone(signal.symbol)
 
             if is_blocked:
-                # PROBE MODE: Relax some blocks for data collection
+                # PROBE MODE: Graded relaxation - allow with size penalty instead of blocking
                 if self.probe_mode and block_reason in ["ob_unstable", "delta_noise"]:
                     # Check if within relaxable thresholds
                     can_relax = False
-                    if block_reason == "ob_unstable" and WINNER_GATE.probe_relax_ob_unstable:
+                    size_mult = 1.0
+                    if block_reason == "ob_unstable" and WINNER_GATE.probe_graded_ob_unstable:
                         # Allow unless extreme (bid_ratio > 0.95 or < 0.05)
                         bid_ratio = market_conditions.get("ob_volume_instability", 0)
                         # instability = abs(bid_ratio - 0.5) * 2, so bid_ratio extreme at instability > 0.9
                         if bid_ratio < 0.9:  # Not extreme
                             can_relax = True
-                    elif block_reason == "delta_noise" and WINNER_GATE.probe_relax_delta_noise:
+                            size_mult = WINNER_GATE.probe_ob_unstable_size_mult  # 0.5x
+                    elif block_reason == "delta_noise" and WINNER_GATE.probe_graded_delta_noise:
                         # Allow unless variance > hard limit
                         variance = market_conditions.get("delta_variance", 0)
                         if variance < WINNER_GATE.probe_delta_variance_max:
                             can_relax = True
+                            size_mult = WINNER_GATE.probe_delta_noise_size_mult  # 0.5x
 
                     if can_relax:
+                        probe_relaxed_reason = block_reason  # Track for experiment_tag
+                        probe_size_penalty = size_mult  # Apply size penalty
                         logger.info(
-                            f"PROBE_RELAX: {signal.symbol} - {block_reason} relaxed | "
-                            f"Will use probe_size={WINNER_GATE.probe_size_multiplier}x"
+                            f"PROBE_GRADED: {signal.symbol} - {block_reason} -> size_penalty={size_mult}x | "
+                            f"probe_relaxed_reason={probe_relaxed_reason}"
                         )
                         is_probe_relaxed_block = True
-                        # Don't return - allow the trade to continue with probe sizing
+                        # Don't return - allow the trade to continue with penalized size
                     else:
                         # Still blocked even in probe mode
                         logger.info(f"NO-TRADE ZONE: {signal.symbol} - {block_reason}: {block_details}")
@@ -666,6 +691,9 @@ class HFTBot:
 
         # Store sizing decision
         self.sizing_decisions[signal.symbol] = confidence
+
+        # Initialize probe tracking variables (will be set by WINNER_GATE checks)
+        probe_low_tier_trade = False  # True if LOW tier trade allowed in PROBE_MODE
 
         # ============================================================
         # WINNER GATE v2 - Dual-Pocket Entry Filter
@@ -762,6 +790,25 @@ class HFTBot:
                             gate_reason = f"pocket_b: spread={current_spread:.4f}% > {WINNER_GATE.pocket_b_max_spread_pct}%"
                         else:
                             gate_reason = f"pocket_b: depth=${ob_depth:.0f} < ${WINNER_GATE.pocket_b_min_depth:.0f}"
+
+                # === PROBE_MODE: Allow LOW tier with tiny size (0.02x) ===
+                probe_low_tier_trade = False
+                if gate_blocked and self.probe_mode and WINNER_GATE.probe_allow_low_tier and tier_str == "low":
+                    # LOW tier allowed in PROBE_MODE only, with tiny size
+                    # Still require minimum imbalance and spread (but relaxed)
+                    low_tier_pass = (
+                        current_imbalance >= 0.55 and  # Very relaxed imbalance
+                        current_spread <= 0.08  # Very relaxed spread
+                    )
+                    if low_tier_pass:
+                        gate_blocked = False
+                        pocket_id = "PROBE_LOW"
+                        probe_low_tier_trade = True
+                        logger.info(
+                            f"PROBE_LOW_TIER: {symbol} | tier=low allowed with "
+                            f"size={WINNER_GATE.probe_low_tier_size_mult}x | "
+                            f"imb={current_imbalance:.3f}, spread={current_spread:.4f}%"
+                        )
 
                 # === NO POCKET MATCHED: Check if regime is blocked ===
                 if gate_blocked and not gate_reason:
@@ -981,6 +1028,21 @@ class HFTBot:
             risk_decision.size_adjustment_reason = f"PROBE_MODE({probe_mode_mult}x): {risk_decision.size_adjustment_reason or 'data collection'}"
             logger.info(f"PROBE_MODE SIZING: {signal.symbol} | size reduced to {probe_mode_mult}x for data collection")
 
+        # Apply graded blocker size penalty (ob_unstable, delta_noise)
+        if probe_size_penalty < 1.0:
+            risk_decision.position_size *= probe_size_penalty
+            risk_decision.position_value *= probe_size_penalty
+            risk_decision.size_adjustment_reason = f"GRADED({probe_size_penalty}x|{probe_relaxed_reason}): {risk_decision.size_adjustment_reason or 'blocker relaxed'}"
+            logger.info(f"GRADED BLOCKER: {signal.symbol} | size penalty {probe_size_penalty}x for {probe_relaxed_reason}")
+
+        # Apply LOW tier size penalty in PROBE_MODE
+        if probe_low_tier_trade:
+            low_tier_mult = WINNER_GATE.probe_low_tier_size_mult
+            risk_decision.position_size *= low_tier_mult
+            risk_decision.position_value *= low_tier_mult
+            risk_decision.size_adjustment_reason = f"LOW_TIER({low_tier_mult}x): {risk_decision.size_adjustment_reason or 'low tier allowed in probe'}"
+            logger.info(f"LOW_TIER SIZING: {signal.symbol} | size reduced to {low_tier_mult}x for low tier")
+
         # Apply EXPLORATION sizing for marginal trades (data collection)
         if is_exploration_trade:
             explore_mult = WINNER_GATE.exploration_min_size_multiplier
@@ -1001,7 +1063,30 @@ class HFTBot:
 
             if result.success:
                 self.trades_executed += 1
-                self.trade_logger.log_trade_entry(result, signal, is_probe=is_probe_trade, cause_class=cause_class)
+
+                # Build experiment_tag for strategy leaderboard grouping
+                # Format: "symbol|regime|pocket|tier|probe_relaxed|mode"
+                tier_str_for_tag = confidence.tier.value if hasattr(confidence.tier, 'value') else str(confidence.tier).lower()
+                pocket_id_for_tag = self.active_pocket.get(signal.symbol, "?")
+                # Build probe_relaxed flags
+                probe_flags = []
+                if probe_relaxed_reason:
+                    probe_flags.append(probe_relaxed_reason)
+                if probe_low_tier_trade:
+                    probe_flags.append("low_tier")
+                probe_relaxed_str = ",".join(probe_flags) if probe_flags else "none"
+                execution_mode_for_tag = getattr(result, 'execution_mode', COST_MODEL.execution_mode)
+
+                experiment_tag = f"{signal.symbol}|{current_regime}|{pocket_id_for_tag}|{tier_str_for_tag}|{probe_relaxed_str}|{execution_mode_for_tag}"
+
+                self.trade_logger.log_trade_entry(
+                    result, signal,
+                    is_probe=is_probe_trade,
+                    cause_class=cause_class,
+                    experiment_tag=experiment_tag,
+                    regime_at_entry=current_regime
+                )
+                logger.debug(f"  experiment_tag={experiment_tag}")
 
                 # Log MICROSTRUCTURE trade flow at entry
                 trade_id = result.order_id or f"{result.symbol}_{result.timestamp}"

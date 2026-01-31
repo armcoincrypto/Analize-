@@ -730,8 +730,20 @@ class TradeLogger:
         except Exception as e:
             pass  # Silently ignore database lock errors
 
-    def log_trade_entry(self, result: TradeResult, signal: Signal, is_probe: bool = False, cause_class: str = "FULL"):
-        """Log trade entry with cause policy tracking."""
+    def log_trade_entry(self, result: TradeResult, signal: Signal, is_probe: bool = False,
+                         cause_class: str = "FULL", experiment_tag: str = None,
+                         regime_at_entry: str = None):
+        """Log trade entry with cause policy tracking and experiment_tag for leaderboard.
+
+        Args:
+            result: Trade execution result
+            signal: Original signal
+            is_probe: Whether this is a probe cause trade
+            cause_class: FULL, PROBE, or PROBE_MODE
+            experiment_tag: Strategy experiment tag for leaderboard grouping
+                           Format: "symbol|regime|pocket|tier|probe_relaxed|mode"
+            regime_at_entry: Market regime at entry time
+        """
         try:
             # Normalize symbol to full format (e.g., XRP -> XRPUSDT) for consistent storage
             normalized_symbol = normalize_symbol(result.symbol)
@@ -745,8 +757,9 @@ class TradeLogger:
                 INSERT INTO trades (
                     trade_id, symbol, side, entry_price, quantity,
                     entry_time, conditions_met, signal_confidence, status,
-                    is_probe_cause, cause_class, execution_mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
+                    is_probe_cause, cause_class, execution_mode, experiment_tag,
+                    regime_at_entry
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
             """, (
                 trade_id,
                 normalized_symbol,
@@ -758,11 +771,14 @@ class TradeLogger:
                 signal.confidence,
                 1 if is_probe else 0,
                 cause_class,
-                execution_mode
+                execution_mode,
+                experiment_tag,
+                regime_at_entry
             ))
 
             self.conn.commit()
-            logger.debug(f"Trade entry logged: {trade_id} | probe={is_probe} | class={cause_class} | mode={execution_mode}")
+            logger.debug(f"Trade entry logged: {trade_id} | probe={is_probe} | class={cause_class} | "
+                        f"mode={execution_mode} | tag={experiment_tag}")
 
         except Exception as e:
             pass  # Silently ignore database lock errors

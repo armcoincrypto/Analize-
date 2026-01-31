@@ -444,8 +444,20 @@ class WinnerGateConfig:
     research_min_imbalance: float = 0.70
 
     # === PROBE PROTECTIONS (research mode - higher limits) ===
-    max_trades_per_symbol_per_hour: int = 6  # Increased for research (was 2)
+    max_trades_per_symbol_per_hour: int = 6  # Default for LIVE mode (strict)
+    paper_max_trades_per_hour: int = 20  # Paper/probe mode (relaxed via PAPER_MAX_TRADES_PER_HOUR env)
     min_seconds_between_trades_per_symbol: int = 120  # 2 minutes
+    paper_min_seconds_between_trades: int = 30  # Paper mode: faster cooldown (30s)
+
+    # === PROBE MODE: LOW tier with tiny size ===
+    probe_allow_low_tier: bool = True  # Allow LOW tier in PROBE_MODE only
+    probe_low_tier_size_mult: float = 0.02  # 0.02x size for LOW tier (tiny)
+
+    # === GRADED BLOCKERS: Size penalties instead of hard blocks ===
+    probe_graded_ob_unstable: bool = True  # Apply size penalty instead of block
+    probe_graded_delta_noise: bool = True  # Apply size penalty instead of block
+    probe_ob_unstable_size_mult: float = 0.5  # 50% size when ob_unstable
+    probe_delta_noise_size_mult: float = 0.5  # 50% size when delta_noise
 
 
 WINNER_GATE = WinnerGateConfig()
