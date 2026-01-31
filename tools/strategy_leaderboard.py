@@ -20,7 +20,7 @@ Usage:
 import argparse
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 
@@ -47,7 +47,7 @@ def fetch_trades(db_path: str, days: int) -> List[Dict[str, Any]]:
     cursor = conn.cursor()
 
     # Calculate cutoff timestamp
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     cutoff_ms = int(cutoff.timestamp() * 1000)
 
     # Check which optional columns exist
@@ -300,8 +300,8 @@ def print_detailed_analysis(results: List[Dict[str, Any]], top: int):
     # Analyze by probe relaxation
     probe_groups = {}
     for r in results:
-        tag = r.get("experiment_tag", "")
-        if "|" in tag:
+        tag = r.get("experiment_tag") or ""
+        if tag and "|" in tag:
             parts = tag.split("|")
             if len(parts) > 4:
                 probe_flag = parts[4]
