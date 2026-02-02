@@ -132,6 +132,7 @@ class ExecutionEngine:
 
         # TASK 9: Edge validation tracking
         self.time_of_mfe: Dict[str, float] = {}       # Time when MFE was reached
+        self.time_of_mae: Dict[str, float] = {}       # Time when MAE was reached
         self.time_of_ob_decay: Dict[str, float] = {}  # Time when OB imbalance decayed
         self.time_of_delta_flip: Dict[str, float] = {}  # Time when delta turned against us
         self.ob_decay_amount: Dict[str, float] = {}   # How much OB decayed
@@ -289,6 +290,7 @@ class ExecutionEngine:
         # TASK 9: Initialize edge tracking
         self.entry_time[signal.symbol] = time.time()
         self.time_of_mfe[signal.symbol] = 0  # Will be set when MFE is updated
+        self.time_of_mae[signal.symbol] = 0  # Will be set when MAE is updated
         self.time_of_ob_decay[signal.symbol] = 0  # Will be set when OB decays
         self.time_of_delta_flip[signal.symbol] = 0  # Will be set when delta flips
         self.ob_decay_amount[signal.symbol] = 0
@@ -468,6 +470,7 @@ class ExecutionEngine:
         # Initialize edge tracking
         self.entry_time[signal.symbol] = time.time()
         self.time_of_mfe[signal.symbol] = 0
+        self.time_of_mae[signal.symbol] = 0  # Will be set when MAE is updated
         self.time_of_ob_decay[signal.symbol] = 0
         self.time_of_delta_flip[signal.symbol] = 0
         self.ob_decay_amount[signal.symbol] = 0
@@ -606,8 +609,8 @@ class ExecutionEngine:
         else:
             pnl_pct = (position.entry_price - current_price) / position.entry_price * 100
 
-        # Update MFE/MAE
-        if position.symbol in self.position_mfe:
+        # Update MFE/MAE (with defensive checks for both dicts)
+        if position.symbol in self.position_mfe and position.symbol in self.position_mae:
             if pnl_pct > self.position_mfe[position.symbol]:
                 self.position_mfe[position.symbol] = pnl_pct
                 # TASK 9: Record time of MFE (max favorable excursion)
@@ -615,6 +618,9 @@ class ExecutionEngine:
                     self.time_of_mfe[position.symbol] = time.time() - self.entry_time[position.symbol]
             if pnl_pct < self.position_mae[position.symbol]:
                 self.position_mae[position.symbol] = pnl_pct
+                # Record time of MAE (max adverse excursion)
+                if position.symbol in self.entry_time:
+                    self.time_of_mae[position.symbol] = time.time() - self.entry_time[position.symbol]
 
         hold_time = (time.time() * 1000 - position.entry_time) / 1000
 
@@ -835,6 +841,8 @@ class ExecutionEngine:
         self.exit_edge_data[trade_id] = {
             "seconds_to_max_favorable": self.time_of_mfe.get(position.symbol, 0),
             "max_favorable_pct": mfe,
+            "seconds_to_max_adverse": self.time_of_mae.get(position.symbol, 0),
+            "max_adverse_pct": mae,
             "seconds_to_ob_decay": self.time_of_ob_decay.get(position.symbol, 0),
             "ob_decay_amount": self.ob_decay_amount.get(position.symbol, 0),
             "delta_persistence_sec": delta_persistence,
@@ -854,6 +862,7 @@ class ExecutionEngine:
 
         # Clean up edge tracking data
         self.time_of_mfe.pop(position.symbol, None)
+        self.time_of_mae.pop(position.symbol, None)
         self.time_of_ob_decay.pop(position.symbol, None)
         self.time_of_delta_flip.pop(position.symbol, None)
         self.ob_decay_amount.pop(position.symbol, None)
