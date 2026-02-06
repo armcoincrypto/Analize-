@@ -8,8 +8,15 @@ Type=simple
 User=root
 WorkingDirectory=/root/Analize-
 ExecStart=__PYTHON_PATH__ /root/Analize-/run_hft.py
+
+# Restart policy
 Restart=on-failure
 RestartSec=10
+
+# Prevent restart loops: max 5 restarts in 300 seconds (5 minutes)
+# If exceeded, service enters failed state and won't restart automatically
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 # Environment variables
 Environment=PYTHONUNBUFFERED=1
@@ -24,6 +31,10 @@ TimeoutStopSec=45
 # Security
 PrivateTmp=true
 NoNewPrivileges=true
+
+# Resource limits (optional, uncomment to enable)
+# MemoryMax=2G
+# CPUQuota=80%
 
 [Install]
 WantedBy=multi-user.target

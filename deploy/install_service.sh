@@ -7,6 +7,7 @@
 set -e
 
 REPO_DIR="/root/Analize-"
+VENV_DIR="${REPO_DIR}/venv"
 SERVICE_NAME="hft-bot"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_FILE="${SCRIPT_DIR}/systemd/hft-bot.service"
@@ -28,37 +29,6 @@ if [[ ! -f "$TEMPLATE_FILE" ]]; then
     exit 1
 fi
 
-# Detect Python path
-detect_python() {
-    local candidates=(
-        "${REPO_DIR}/venv/bin/python3"
-        "${REPO_DIR}/venv/bin/python"
-        "/usr/bin/python3"
-    )
-
-    for python_path in "${candidates[@]}"; do
-        if [[ -x "$python_path" ]]; then
-            echo "$python_path"
-            return 0
-        fi
-    done
-
-    echo "ERROR: No Python interpreter found" >&2
-    return 1
-}
-
-PYTHON_PATH=$(detect_python)
-if [[ $? -ne 0 ]]; then
-    echo "ERROR: Could not find a valid Python interpreter"
-    echo "Checked locations:"
-    echo "  - ${REPO_DIR}/venv/bin/python3"
-    echo "  - ${REPO_DIR}/venv/bin/python"
-    echo "  - /usr/bin/python3"
-    exit 1
-fi
-
-echo "Detected Python: $PYTHON_PATH"
-
 # Verify repo directory exists
 if [[ ! -d "$REPO_DIR" ]]; then
     echo "ERROR: Repository directory not found: $REPO_DIR"
@@ -70,6 +40,106 @@ if [[ ! -f "${REPO_DIR}/run_hft.py" ]]; then
     echo "ERROR: run_hft.py not found in $REPO_DIR"
     exit 1
 fi
+
+# Verify requirements.txt exists
+if [[ ! -f "${REPO_DIR}/requirements.txt" ]]; then
+    echo "ERROR: requirements.txt not found in $REPO_DIR"
+    exit 1
+fi
+
+echo ""
+echo "========================================"
+echo "Step 1: Virtual Environment Setup"
+echo "========================================"
+
+# Create venv if it doesn't exist
+if [[ ! -d "$VENV_DIR" ]]; then
+    echo "Creating virtual environment at ${VENV_DIR}..."
+    python3 -m venv "$VENV_DIR"
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: Failed to create virtual environment"
+        echo "Make sure python3-venv is installed: apt install python3-venv"
+        exit 1
+    fi
+    echo "Virtual environment created successfully"
+else
+    echo "Virtual environment already exists at ${VENV_DIR}"
+fi
+
+# Verify venv Python exists
+PYTHON_PATH="${VENV_DIR}/bin/python3"
+if [[ ! -x "$PYTHON_PATH" ]]; then
+    echo "ERROR: Python not found in venv: $PYTHON_PATH"
+    exit 1
+fi
+
+echo "Using Python: $PYTHON_PATH"
+"$PYTHON_PATH" --version
+
+echo ""
+echo "========================================"
+echo "Step 2: Install Dependencies"
+echo "========================================"
+
+# Upgrade pip first
+echo "Upgrading pip..."
+"$PYTHON_PATH" -m pip install --upgrade pip
+
+# Install requirements
+echo "Installing dependencies from requirements.txt..."
+"$PYTHON_PATH" -m pip install -r "${REPO_DIR}/requirements.txt"
+
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: Failed to install dependencies"
+    exit 1
+fi
+
+echo "Dependencies installed successfully"
+
+echo ""
+echo "========================================"
+echo "Step 3: Verify Runtime Imports"
+echo "========================================"
+
+# Critical imports to verify
+CRITICAL_IMPORTS=(
+    "websockets"
+    "pandas"
+    "numpy"
+    "pydantic"
+    "asyncio"
+)
+
+echo "Verifying critical imports..."
+for module in "${CRITICAL_IMPORTS[@]}"; do
+    echo -n "  Checking $module... "
+    if "$PYTHON_PATH" -c "import $module" 2>/dev/null; then
+        echo "OK"
+    else
+        echo "FAILED"
+        echo "ERROR: Failed to import $module"
+        echo "Try reinstalling: ${VENV_DIR}/bin/pip install $module"
+        exit 1
+    fi
+done
+
+# Verify the main HFT system can be imported
+echo -n "  Checking hft_system... "
+cd "$REPO_DIR"
+if "$PYTHON_PATH" -c "import sys; sys.path.insert(0, '.'); from hft_system import hft_bot" 2>/dev/null; then
+    echo "OK"
+else
+    echo "FAILED"
+    echo "WARNING: Could not import hft_system.hft_bot (may work at runtime)"
+fi
+
+echo ""
+echo "All critical imports verified successfully"
+
+echo ""
+echo "========================================"
+echo "Step 4: Install Systemd Service"
+echo "========================================"
 
 # Stop existing service if running
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
@@ -90,8 +160,16 @@ systemctl daemon-reload
 echo "Enabling ${SERVICE_NAME} service..."
 systemctl enable "$SERVICE_NAME"
 
+echo ""
+echo "========================================"
+echo "Step 5: Start Service"
+echo "========================================"
+
 echo "Starting ${SERVICE_NAME} service..."
 systemctl start "$SERVICE_NAME"
+
+# Wait a moment for service to start
+sleep 2
 
 echo ""
 echo "========================================"
@@ -111,10 +189,12 @@ echo "Installation Complete"
 echo "========================================"
 echo "Service: ${SERVICE_NAME}"
 echo "Python:  ${PYTHON_PATH}"
+echo "Venv:    ${VENV_DIR}"
 echo ""
 echo "Useful commands:"
 echo "  systemctl status ${SERVICE_NAME}     # Check status"
 echo "  systemctl restart ${SERVICE_NAME}    # Restart service"
 echo "  systemctl stop ${SERVICE_NAME}       # Stop service"
 echo "  journalctl -u ${SERVICE_NAME} -f     # Follow logs"
+echo "  journalctl -u ${SERVICE_NAME} -n 80  # Last 80 log lines"
 echo "========================================"
