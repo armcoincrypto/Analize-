@@ -88,3 +88,12 @@ crash.log
 
 # Docker
 .docker/
+
+# Local artifacts
+hft_trades.db
+hft_trades.db-*
+*.db-wal
+*.db-shm
+*.backup
+audit_*.txt
+strategies/generated_active.yml
