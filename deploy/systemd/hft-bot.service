@@ -1,0 +1,29 @@
+[Unit]
+Description=HFT Trading Bot - Microstructure Analysis Engine
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Analize-
+ExecStart=__PYTHON_PATH__ /root/Analize-/run_hft.py
+Restart=on-failure
+RestartSec=10
+
+# Environment variables
+Environment=PYTHONUNBUFFERED=1
+Environment=PAPER_MAX_TRADES_PER_HOUR=20
+Environment=HFT_PROBE_MODE=0
+Environment=RELAXED_MODE=0
+
+# Graceful shutdown
+KillSignal=SIGINT
+TimeoutStopSec=45
+
+# Security
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
