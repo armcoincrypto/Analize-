@@ -66,6 +66,7 @@ class HFTBot:
         self.mode = mode
         self.capital = capital or SYSTEM_CONFIG.initial_capital
         self.running = False
+        self._tasks: list[asyncio.Task] = []  # Track background tasks for graceful shutdown
 
         # ============================================================
         # DATABASE SCHEMA GUARDRAILS
@@ -1433,111 +1434,123 @@ class HFTBot:
 
     async def _signal_scan_loop(self):
         """Periodically scan for signals."""
-        # Wait for WebSocket data to populate
-        logger.info("Waiting 30s for WebSocket data to populate...")
-        await asyncio.sleep(30)
+        try:
+            # Wait for WebSocket data to populate
+            logger.info("Waiting 30s for WebSocket data to populate...")
+            await asyncio.sleep(30)
 
-        # TASK 10: Initialize market regime classification for all assets
-        logger.info("Initializing market regime classification...")
-        for symbol in SYSTEM_CONFIG.enabled_assets:
-            try:
-                raw_regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
-                # Apply hysteresis (will initialize stable regime on first call)
-                stable_regime = self._apply_regime_hysteresis(symbol, raw_regime)
-                self.current_regime[symbol] = stable_regime
-                self.regime_confidence[symbol] = confidence
-                # Initialize stable regime tracking
-                self.regime_stable[symbol] = stable_regime
-                self.regime_stable_since[symbol] = time.time()
-                # Skip DB logging at startup - let the scan loop handle it
-                logger.info(f"  {symbol}: regime={stable_regime} (raw={raw_regime}, confidence={confidence:.2f})")
-            except Exception as e:
-                logger.warning(f"  {symbol}: Failed to classify regime: {e}")
-                self.current_regime[symbol] = "unknown"
-                self.regime_confidence[symbol] = 0.0
+            # TASK 10: Initialize market regime classification for all assets
+            logger.info("Initializing market regime classification...")
+            for symbol in SYSTEM_CONFIG.enabled_assets:
+                try:
+                    raw_regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                    # Apply hysteresis (will initialize stable regime on first call)
+                    stable_regime = self._apply_regime_hysteresis(symbol, raw_regime)
+                    self.current_regime[symbol] = stable_regime
+                    self.regime_confidence[symbol] = confidence
+                    # Initialize stable regime tracking
+                    self.regime_stable[symbol] = stable_regime
+                    self.regime_stable_since[symbol] = time.time()
+                    # Skip DB logging at startup - let the scan loop handle it
+                    logger.info(f"  {symbol}: regime={stable_regime} (raw={raw_regime}, confidence={confidence:.2f})")
+                except Exception as e:
+                    logger.warning(f"  {symbol}: Failed to classify regime: {e}")
+                    self.current_regime[symbol] = "unknown"
+                    self.regime_confidence[symbol] = 0.0
 
-        logger.info("Starting signal scan loop")
-        scan_count = 0
+            logger.info("Starting signal scan loop")
+            scan_count = 0
 
-        while self.running:
-            try:
-                # Scan all assets for signals
-                signals = self.signal_engine.scan_all_assets()
+            while self.running:
+                try:
+                    # Scan all assets for signals
+                    signals = self.signal_engine.scan_all_assets()
 
-                # Process any valid signals
-                for signal in signals:
-                    await self._on_signal(signal)
+                    # Process any valid signals
+                    for signal in signals:
+                        await self._on_signal(signal)
 
-                # Log indicator snapshot every scan (1 second)
-                for symbol in SYSTEM_CONFIG.enabled_assets:
-                    signal = self.signal_engine.check_all_conditions(symbol)
-                    status = self.signal_engine.get_status().get(symbol, {})
-
-                    # Add conditions_met to status
-                    status["conditions_met"] = signal.conditions_met
-
-                    # Log indicator values
-                    self.trade_logger.log_indicator_snapshot(symbol, status)
-
-                    # Log strategy signal for multi-strategy analysis
-                    conditions = {c.name: c.triggered for c in signal.conditions}
-                    self.trade_logger.log_strategy_signal(symbol, signal.entry_price, conditions)
-
-                    # Log orderbook snapshot
-                    orderbook = self.ws_manager.get_orderbook(symbol)
-                    if orderbook:
-                        self.trade_logger.log_orderbook_snapshot(symbol, {
-                            "best_bid": orderbook.best_bid,
-                            "best_ask": orderbook.best_ask,
-                            "bid_volume": orderbook.bid_volume,
-                            "ask_volume": orderbook.ask_volume,
-                            "spread_pct": orderbook.spread,
-                            "imbalance": orderbook.imbalance_ratio
-                        })
-
-                    # Update old signals with current price (for outcome tracking)
-                    if signal.entry_price and signal.entry_price > 0:
-                        self.trade_logger.update_signal_outcomes(symbol, signal.entry_price)
-
-                    # Log CVD (Cumulative Volume Delta) snapshot
-                    cvd_data = self.ws_manager.get_cvd(symbol)
-                    self.trade_logger.log_cvd_snapshot(symbol, cvd_data)
-
-                # Batch commit every 10 scans
-                scan_count += 1
-                if scan_count % 10 == 0:
-                    self.trade_logger.batch_commit()
-
-                # TASK 10: Classify market regime every 30 scans (30 seconds)
-                # Apply hysteresis to prevent rapid regime flipping
-                if scan_count % 30 == 0:
+                    # Log indicator snapshot every scan (1 second)
                     for symbol in SYSTEM_CONFIG.enabled_assets:
-                        try:
-                            raw_regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
-                            # Apply hysteresis - only changes stable regime after N confirmations
-                            stable_regime = self._apply_regime_hysteresis(symbol, raw_regime)
-                            old_regime = self.current_regime.get(symbol, "unknown")
-                            self.current_regime[symbol] = stable_regime
-                            self.regime_confidence[symbol] = confidence
-                            # Log with both raw and stable for analysis
-                            self.trade_logger.log_market_regime(symbol, stable_regime, metrics, confidence)
-                        except Exception as e:
-                            logger.warning(f"Regime classification failed for {symbol}: {e}")
+                        signal = self.signal_engine.check_all_conditions(symbol)
+                        status = self.signal_engine.get_status().get(symbol, {})
 
-                await asyncio.sleep(1)  # Scan every second
+                        # Add conditions_met to status
+                        status["conditions_met"] = signal.conditions_met
 
-            except Exception as e:
-                logger.error(f"Error in signal scan: {e}")
-                await asyncio.sleep(5)
+                        # Log indicator values
+                        self.trade_logger.log_indicator_snapshot(symbol, status)
+
+                        # Log strategy signal for multi-strategy analysis
+                        conditions = {c.name: c.triggered for c in signal.conditions}
+                        self.trade_logger.log_strategy_signal(symbol, signal.entry_price, conditions)
+
+                        # Log orderbook snapshot
+                        orderbook = self.ws_manager.get_orderbook(symbol)
+                        if orderbook:
+                            self.trade_logger.log_orderbook_snapshot(symbol, {
+                                "best_bid": orderbook.best_bid,
+                                "best_ask": orderbook.best_ask,
+                                "bid_volume": orderbook.bid_volume,
+                                "ask_volume": orderbook.ask_volume,
+                                "spread_pct": orderbook.spread,
+                                "imbalance": orderbook.imbalance_ratio
+                            })
+
+                        # Update old signals with current price (for outcome tracking)
+                        if signal.entry_price and signal.entry_price > 0:
+                            self.trade_logger.update_signal_outcomes(symbol, signal.entry_price)
+
+                        # Log CVD (Cumulative Volume Delta) snapshot
+                        cvd_data = self.ws_manager.get_cvd(symbol)
+                        self.trade_logger.log_cvd_snapshot(symbol, cvd_data)
+
+                    # Batch commit every 10 scans
+                    scan_count += 1
+                    if scan_count % 10 == 0:
+                        self.trade_logger.batch_commit()
+
+                    # TASK 10: Classify market regime every 30 scans (30 seconds)
+                    # Apply hysteresis to prevent rapid regime flipping
+                    if scan_count % 30 == 0:
+                        for symbol in SYSTEM_CONFIG.enabled_assets:
+                            try:
+                                raw_regime, confidence, metrics = self.ws_manager.classify_market_regime(symbol)
+                                # Apply hysteresis - only changes stable regime after N confirmations
+                                stable_regime = self._apply_regime_hysteresis(symbol, raw_regime)
+                                old_regime = self.current_regime.get(symbol, "unknown")
+                                self.current_regime[symbol] = stable_regime
+                                self.regime_confidence[symbol] = confidence
+                                # Log with both raw and stable for analysis
+                                self.trade_logger.log_market_regime(symbol, stable_regime, metrics, confidence)
+                            except Exception as e:
+                                logger.warning(f"Regime classification failed for {symbol}: {e}")
+
+                    await asyncio.sleep(1)  # Scan every second
+
+                except asyncio.CancelledError:
+                    raise  # Re-raise to exit the loop
+                except Exception as e:
+                    logger.error(f"Error in signal scan: {e}")
+                    await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.info("Signal scan loop cancelled")
+            raise
 
     async def _status_loop(self):
         """Periodically print status."""
-        while self.running:
-            try:
-                await asyncio.sleep(60)  # Every minute
-                self._print_status()
-            except Exception as e:
-                logger.error(f"Error in status loop: {e}")
+        try:
+            while self.running:
+                try:
+                    await asyncio.sleep(60)  # Every minute
+                    self._print_status()
+                except asyncio.CancelledError:
+                    raise  # Re-raise to exit the loop
+                except Exception as e:
+                    logger.error(f"Error in status loop: {e}")
+        except asyncio.CancelledError:
+            logger.info("Status loop cancelled")
+            raise
 
     def _print_status(self):
         """Print current bot status with condition debug info."""
@@ -1632,16 +1645,16 @@ class HFTBot:
         logger.info("HFT BOT STARTING")
         logger.info("=" * 60)
 
-        # Start all tasks concurrently
-        tasks = [
-            asyncio.create_task(self.ws_manager.connect()),
-            asyncio.create_task(self.execution_engine.start_monitoring()),
-            asyncio.create_task(self._signal_scan_loop()),
-            asyncio.create_task(self._status_loop())
+        # Start all tasks concurrently and track them for graceful shutdown
+        self._tasks = [
+            asyncio.create_task(self.ws_manager.connect(), name="ws_connect"),
+            asyncio.create_task(self.execution_engine.start_monitoring(), name="position_monitor"),
+            asyncio.create_task(self._signal_scan_loop(), name="signal_scan"),
+            asyncio.create_task(self._status_loop(), name="status_loop")
         ]
 
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
             logger.info("Bot tasks cancelled")
         except Exception as e:
@@ -1656,6 +1669,20 @@ class HFTBot:
 
         # Stop components
         self.execution_engine.stop_monitoring()
+
+        # Cancel all background tasks
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+                logger.info(f"Cancelled task: {task.get_name()}")
+
+        # Wait for tasks to finish with cancellation
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            logger.info("All background tasks stopped")
+
+        self._tasks.clear()
+
         await self.ws_manager.disconnect()
 
         # Close any open positions

@@ -915,13 +915,19 @@ class ExecutionEngine:
         self.monitoring = True
         logger.info("Position monitoring started")
 
-        while self.monitoring:
-            try:
-                await self.check_exits()
-                await asyncio.sleep(self.monitor_interval)
-            except Exception as e:
-                logger.error(f"Error in monitoring loop: {e}")
-                await asyncio.sleep(1)
+        try:
+            while self.monitoring:
+                try:
+                    await self.check_exits()
+                    await asyncio.sleep(self.monitor_interval)
+                except asyncio.CancelledError:
+                    break  # Exit loop on cancellation
+                except Exception as e:
+                    logger.error(f"Error in monitoring loop: {e}")
+                    await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("Position monitoring cancelled")
+            raise
 
     def stop_monitoring(self):
         """Stop position monitoring."""
