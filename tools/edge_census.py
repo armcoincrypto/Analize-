@@ -633,8 +633,11 @@ Examples:
   # Custom dimensions
   python tools/edge_census.py --dimensions symbol,regime,cause_class,confidence_tier
 
-  # Output to CSV
-  python tools/edge_census.py --output edge_census.csv --format csv
+  # Output to CSV (new style)
+  python tools/edge_census.py --format csv --output edge_census.csv
+
+  # Output to CSV (legacy style)
+  python tools/edge_census.py --out-csv edge_census.csv
 
   # Limit to recent data
   python tools/edge_census.py --days 7 --min-trades 10
@@ -667,7 +670,8 @@ Examples:
         "--metric",
         type=str,
         default="pnl_after_costs_pct",
-        help="PnL metric column to use (default: pnl_after_costs_pct)"
+        help="PnL metric column to use (default: pnl_after_costs_pct). "
+             "Common values: pnl_after_costs_pct, pnl_pct, pnl"
     )
 
     parser.add_argument(
@@ -699,11 +703,35 @@ Examples:
         help="Output format (default: table)"
     )
 
+    # Legacy output options (backward compatibility)
+    parser.add_argument(
+        "--out-csv",
+        type=str,
+        default=None,
+        dest="out_csv",
+        help="[Legacy] Output CSV file path"
+    )
+
+    parser.add_argument(
+        "--out-json",
+        type=str,
+        default=None,
+        dest="out_json",
+        help="[Legacy] Output JSON file path"
+    )
+
     parser.add_argument(
         "--top",
         type=int,
         default=None,
         help="Show only top N results"
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="[Legacy] Alias for --top"
     )
 
     parser.add_argument(
@@ -721,6 +749,16 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Handle legacy options
+    if args.out_csv:
+        args.format = "csv"
+        args.output = args.out_csv
+    if args.out_json:
+        args.format = "json"
+        args.output = args.out_json
+    if args.limit and not args.top:
+        args.top = args.limit
 
     # Find database
     db_path = find_db_path(args.db)
