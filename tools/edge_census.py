@@ -21,6 +21,9 @@ Usage:
     python tools/edge_census.py --db hft_trades.db --dimensions symbol,regime,cause_class \\
         --metric pnl_after_costs_pct --min-trades 20
 
+    # Use after-costs metric explicitly
+    python tools/edge_census.py --db hft_trades.db --metric pnl_after_costs_pct --min-trades 30
+
     # Output to CSV
     python tools/edge_census.py --db hft_trades.db --output edge_census.csv --format csv
 
@@ -40,6 +43,17 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Add parent dir for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+# Supported metrics - these are the validated options
+SUPPORTED_METRICS = ["pnl_after_costs_pct", "pnl_pct", "pnl"]
+
+# Metric to column mapping (metric name -> actual column name in trades table)
+METRIC_COLUMN_MAP = {
+    "pnl_after_costs_pct": "pnl_after_costs_pct",
+    "pnl_pct": "pnl_pct",
+    "pnl": "pnl",
+}
 
 
 # -----------------------------------------------------------------------------
@@ -132,6 +146,10 @@ def print_schema_report(schema: DbSchema):
             print(f"   trades: MISSING required columns: {missing}")
         else:
             print(f"   trades: OK - has {len(available)} optional analysis columns")
+
+        # Show available PnL metrics
+        pnl_metrics = {"pnl_after_costs_pct", "pnl_pct", "pnl"} & trades_cols
+        print(f"   Available PnL metrics: {pnl_metrics}")
     else:
         print("   trades: NOT FOUND")
 
@@ -173,12 +191,30 @@ class QueryPlan:
     order_by: str = "expectancy DESC"
 
 
+def resolve_metric_column(metric: str, col_override: Optional[str] = None) -> str:
+    """
+    Resolve the actual column name for a given metric.
+
+    Args:
+        metric: The metric name (e.g., 'pnl_after_costs_pct', 'pnl_pct', 'pnl')
+        col_override: Optional explicit column override
+
+    Returns:
+        The actual column name to use in queries
+    """
+    if col_override:
+        return col_override
+    return METRIC_COLUMN_MAP.get(metric, metric)
+
+
 def build_query_plan(
     schema: DbSchema,
     dimensions: List[str],
     metric: str,
     min_trades: int,
-    days: Optional[int] = None
+    days: Optional[int] = None,
+    base_table: str = "trades",
+    col_override: Optional[str] = None
 ) -> QueryPlan:
     """
     Build an optimized query plan based on available schema.
@@ -187,9 +223,13 @@ def build_query_plan(
     columns that may be in position_sizing or trade_edge tables.
     """
     plan = QueryPlan()
-    plan.metric_col = metric
+    plan.base_table = base_table
 
-    trades_cols = schema.get_columns("trades")
+    # Resolve the actual column for the metric
+    resolved_col = resolve_metric_column(metric, col_override)
+    plan.metric_col = resolved_col
+
+    trades_cols = schema.get_columns(base_table)
     ps_cols = schema.get_columns("position_sizing") if schema.has_table("position_sizing") else set()
     te_cols = schema.get_columns("trade_edge") if schema.has_table("trade_edge") else set()
 
@@ -300,21 +340,21 @@ def build_query_plan(
         plan.select_cols.append(f"{expr} AS {alias}")
         plan.group_cols.append(expr)
 
-    # Validate metric column
-    metric_expr = f"t.{metric}"
-    if metric not in trades_cols:
+    # Validate metric column exists in the schema
+    metric_expr = f"t.{resolved_col}"
+    if resolved_col not in trades_cols:
         # Try position_sizing or trade_edge
-        if metric in ps_cols:
-            metric_expr = f"ps.{metric}"
+        if resolved_col in ps_cols:
+            metric_expr = f"ps.{resolved_col}"
             if not need_position_sizing:
                 plan.joins.append("LEFT JOIN position_sizing ps ON t.trade_id = ps.trade_id")
-        elif metric in te_cols:
-            metric_expr = f"te.{metric}"
+        elif resolved_col in te_cols:
+            metric_expr = f"te.{resolved_col}"
             if not need_trade_edge:
                 plan.joins.append("LEFT JOIN trade_edge te ON t.trade_id = te.trade_id")
         else:
             # Fallback to pnl_after_costs_pct
-            print(f"WARNING: metric '{metric}' not found, using pnl_after_costs_pct")
+            print(f"WARNING: metric column '{resolved_col}' not found, falling back to pnl_after_costs_pct")
             metric_expr = "t.pnl_after_costs_pct"
 
     plan.metric_col = metric_expr
@@ -328,7 +368,7 @@ def build_query_plan(
 
 def build_expectancy_sql(plan: QueryPlan) -> str:
     """Build the final SQL query from the plan."""
-    # Aggregate expressions
+    # Aggregate expressions - win calculation uses the metric column
     aggregates = [
         "COUNT(*) AS n_trades",
         f"ROUND(AVG({plan.metric_col}), 6) AS expectancy",
@@ -350,7 +390,7 @@ def build_expectancy_sql(plan: QueryPlan) -> str:
     select_clause = ",\n        ".join(select_items)
 
     # Build FROM with JOINs
-    from_clause = f"FROM trades t"
+    from_clause = f"FROM {plan.base_table} t"
     if plan.joins:
         from_clause += "\n        " + "\n        ".join(plan.joins)
 
@@ -416,7 +456,9 @@ def run_expectancy_analysis(
     metric: str,
     min_trades: int,
     days: Optional[int] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    base_table: str = "trades",
+    col_override: Optional[str] = None
 ) -> List[ExpectancyBucket]:
     """
     Run expectancy bucket analysis on the database.
@@ -424,7 +466,10 @@ def run_expectancy_analysis(
     Returns list of ExpectancyBucket sorted by expectancy descending.
     """
     # Build query plan
-    plan = build_query_plan(schema, dimensions, metric, min_trades, days)
+    plan = build_query_plan(
+        schema, dimensions, metric, min_trades, days,
+        base_table=base_table, col_override=col_override
+    )
 
     # Generate SQL
     sql = build_expectancy_sql(plan)
@@ -476,7 +521,7 @@ def run_expectancy_analysis(
 # Output Formatters
 # -----------------------------------------------------------------------------
 
-def format_table(results: List[ExpectancyBucket], dimensions: List[str]) -> str:
+def format_table(results: List[ExpectancyBucket], dimensions: List[str], metric_name: str = "pnl_after_costs_pct") -> str:
     """Format results as a text table."""
     if not results:
         return "No data found matching criteria."
@@ -485,7 +530,7 @@ def format_table(results: List[ExpectancyBucket], dimensions: List[str]) -> str:
 
     # Header
     lines.append("=" * 120)
-    lines.append(" EXPECTANCY CENSUS - Bucket Analysis")
+    lines.append(f" EXPECTANCY CENSUS - Bucket Analysis (metric: {metric_name})")
     lines.append("=" * 120)
     lines.append("")
 
@@ -548,6 +593,11 @@ def write_csv(results: List[ExpectancyBucket], output_path: str, dimensions: Lis
         print("No data to write.")
         return
 
+    # Ensure output directory exists
+    output_dir = Path(output_path).parent
+    if output_dir and not output_dir.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     with open(output_path, "w", newline="") as f:
         # Get all keys from first result
         first_dict = results[0].as_dict()
@@ -562,10 +612,16 @@ def write_csv(results: List[ExpectancyBucket], output_path: str, dimensions: Lis
     print(f"Wrote {len(results)} rows to {output_path}")
 
 
-def write_json(results: List[ExpectancyBucket], output_path: str):
+def write_json(results: List[ExpectancyBucket], output_path: str, metric_name: str = "pnl_after_costs_pct"):
     """Write results to JSON file."""
+    # Ensure output directory exists
+    output_dir = Path(output_path).parent
+    if output_dir and not output_dir.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     data = {
         "generated_at": datetime.now().isoformat(),
+        "metric": metric_name,
         "total_buckets": len(results),
         "total_trades": sum(b.n_trades for b in results),
         "buckets": [b.as_dict() for b in results]
@@ -627,11 +683,17 @@ Examples:
   # Inspect database schema
   python tools/edge_census.py --inspect
 
-  # Basic analysis with default dimensions
+  # Basic analysis with default dimensions (uses pnl_after_costs_pct by default)
   python tools/edge_census.py --min-trades 30
 
   # Custom dimensions
   python tools/edge_census.py --dimensions symbol,regime,cause_class,confidence_tier
+
+  # Explicitly use after-costs metric (the default)
+  python tools/edge_census.py --metric pnl_after_costs_pct --min-trades 30
+
+  # Use raw pnl_pct metric (before costs) for comparison
+  python tools/edge_census.py --metric pnl_pct --min-trades 30
 
   # Output to CSV (new style)
   python tools/edge_census.py --format csv --output edge_census.csv
@@ -641,6 +703,11 @@ Examples:
 
   # Limit to recent data
   python tools/edge_census.py --days 7 --min-trades 10
+
+Supported metrics:
+  - pnl_after_costs_pct (default): PnL percentage after all trading costs
+  - pnl_pct: Raw PnL percentage before costs
+  - pnl: Absolute PnL value
         """
     )
 
@@ -649,6 +716,13 @@ Examples:
         type=str,
         default="hft_trades.db",
         help="Path to SQLite database (default: hft_trades.db)"
+    )
+
+    parser.add_argument(
+        "--table",
+        type=str,
+        default="trades",
+        help="Base table name to query (default: trades)"
     )
 
     parser.add_argument(
@@ -669,9 +743,26 @@ Examples:
     parser.add_argument(
         "--metric",
         type=str,
+        choices=SUPPORTED_METRICS,
         default="pnl_after_costs_pct",
-        help="PnL metric column to use (default: pnl_after_costs_pct). "
-             "Common values: pnl_after_costs_pct, pnl_pct, pnl"
+        help="PnL metric to use for expectancy calculation (default: pnl_after_costs_pct). "
+             "Choices: pnl_after_costs_pct (after costs), pnl_pct (before costs), pnl (absolute)"
+    )
+
+    parser.add_argument(
+        "--col-pnl-pct",
+        type=str,
+        default=None,
+        dest="col_pnl_pct",
+        help="Override column name for pnl_pct metric"
+    )
+
+    parser.add_argument(
+        "--col-pnl-after-costs-pct",
+        type=str,
+        default=None,
+        dest="col_pnl_after_costs_pct",
+        help="Override column name for pnl_after_costs_pct metric"
     )
 
     parser.add_argument(
@@ -760,6 +851,13 @@ Examples:
     if args.limit and not args.top:
         args.top = args.limit
 
+    # Determine column override based on metric and CLI flags
+    col_override = None
+    if args.metric == "pnl_after_costs_pct" and args.col_pnl_after_costs_pct:
+        col_override = args.col_pnl_after_costs_pct
+    elif args.metric == "pnl_pct" and args.col_pnl_pct:
+        col_override = args.col_pnl_pct
+
     # Find database
     db_path = find_db_path(args.db)
     if not db_path.exists():
@@ -783,11 +881,19 @@ Examples:
         conn.close()
         return 0
 
-    # Validate trades table exists
-    if not schema.has_table("trades"):
-        print("ERROR: 'trades' table not found in database")
+    # Validate base table exists
+    if not schema.has_table(args.table):
+        print(f"ERROR: '{args.table}' table not found in database")
         conn.close()
         return 1
+
+    # Validate metric column exists in schema
+    resolved_col = resolve_metric_column(args.metric, col_override)
+    table_cols = schema.get_columns(args.table)
+    if resolved_col not in table_cols:
+        print(f"WARNING: Column '{resolved_col}' not found in {args.table} table")
+        print(f"Available columns: {sorted(table_cols)}")
+        # Continue anyway - the query builder will handle fallback
 
     # Parse dimensions
     dimensions = [d.strip() for d in args.dimensions.split(",")]
@@ -795,7 +901,8 @@ Examples:
     # Print header
     print(f"\nEdge Census Analysis")
     print(f"  Database: {db_path}")
-    print(f"  Metric: {args.metric}")
+    print(f"  Table: {args.table}")
+    print(f"  Metric: {args.metric} -> column: {resolved_col}")
     print(f"  Dimensions: {', '.join(dimensions)}")
     print(f"  Min trades: {args.min_trades}")
     if args.days:
@@ -811,7 +918,9 @@ Examples:
             metric=args.metric,
             min_trades=args.min_trades,
             days=args.days,
-            verbose=args.verbose
+            verbose=args.verbose,
+            base_table=args.table,
+            col_override=col_override
         )
     except Exception as e:
         print(f"ERROR: Analysis failed: {e}")
@@ -850,11 +959,12 @@ Examples:
 
     elif args.format == "json":
         if args.output:
-            write_json(results, args.output)
+            write_json(results, args.output, args.metric)
         else:
             # Write to stdout
             data = {
                 "generated_at": datetime.now().isoformat(),
+                "metric": args.metric,
                 "total_buckets": len(results),
                 "total_trades": sum(b.n_trades for b in results),
                 "buckets": [b.as_dict() for b in results]
@@ -862,7 +972,7 @@ Examples:
             print(json.dumps(data, indent=2))
 
     else:  # table format
-        output = format_table(results, dimensions)
+        output = format_table(results, dimensions, args.metric)
         if args.output:
             with open(args.output, "w") as f:
                 f.write(output)
