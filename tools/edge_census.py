@@ -189,6 +189,8 @@ class QueryPlan:
     metric_col: str = "pnl_after_costs_pct"
     having_clause: str = ""
     order_by: str = "expectancy DESC"
+    has_mfe: bool = False  # Whether mfe column exists in base table
+    has_mae: bool = False  # Whether mae column exists in base table
 
 
 def resolve_metric_column(metric: str, col_override: Optional[str] = None) -> str:
@@ -359,6 +361,10 @@ def build_query_plan(
 
     plan.metric_col = metric_expr
 
+    # Check if MFE/MAE columns exist in the base table
+    plan.has_mfe = "mfe" in trades_cols
+    plan.has_mae = "mae" in trades_cols
+
     # HAVING clause for min trades
     if min_trades > 0:
         plan.having_clause = f"HAVING COUNT(*) >= {min_trades}"
@@ -378,12 +384,11 @@ def build_expectancy_sql(plan: QueryPlan) -> str:
         f"ROUND(AVG(CASE WHEN {plan.metric_col} <= 0 THEN {plan.metric_col} END), 6) AS avg_loss",
     ]
 
-    # Add MFE/MAE if available in metric expression table
-    if "t." in plan.metric_col or plan.metric_col.startswith("t."):
-        aggregates.extend([
-            "ROUND(AVG(t.mfe), 6) AS avg_mfe",
-            "ROUND(AVG(t.mae), 6) AS avg_mae",
-        ])
+    # Add MFE/MAE only if the columns exist in the base table
+    if plan.has_mfe:
+        aggregates.append("ROUND(AVG(t.mfe), 6) AS avg_mfe")
+    if plan.has_mae:
+        aggregates.append("ROUND(AVG(t.mae), 6) AS avg_mae")
 
     # Build SELECT
     select_items = plan.select_cols + aggregates
