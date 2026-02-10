@@ -18,7 +18,7 @@ Usage:
     python tools/edge_census.py --db hft_trades.db --min-trades 30
 
     # Custom dimensions and metric
-    python tools/edge_census.py --db hft_trades.db --dimensions symbol,regime,cause_class \\
+    python tools/edge_census.py --db hft_trades.db --dimensions symbol,regime,cause_class \
         --metric pnl_after_costs_pct --min-trades 20
 
     # Use after-costs metric explicitly
@@ -34,9 +34,10 @@ Usage:
 import argparse
 import csv
 import json
+import math
 import sqlite3
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -54,6 +55,107 @@ METRIC_COLUMN_MAP = {
     "pnl_pct": "pnl_pct",
     "pnl": "pnl",
 }
+
+
+# -----------------------------------------------------------------------------
+# Statistical Functions
+# -----------------------------------------------------------------------------
+
+def t_critical(df: int, confidence: float = 0.95) -> float:
+    """
+    Approximate t-critical value for given degrees of freedom.
+    Uses approximation for df > 30, lookup table for smaller df.
+    """
+    # Two-tailed critical values for 95% confidence
+    t_table_95 = {
+        1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+        6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+        11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+        16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+        21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060,
+        26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042,
+    }
+
+    if df <= 0:
+        return 1.96  # fallback to z-score
+    elif df <= 30:
+        return t_table_95.get(df, 2.042)
+    else:
+        # Approximation for large df approaches z-score
+        return 1.96 + 0.5 / df
+
+
+def calculate_ci(values: List[float], confidence: float = 0.95) -> Tuple[float, float, float]:
+    """
+    Calculate confidence interval using t-distribution.
+
+    Returns: (mean, ci_low, ci_high)
+    """
+    n = len(values)
+    if n < 2:
+        mean = values[0] if values else 0.0
+        return mean, mean, mean
+
+    mean = sum(values) / n
+    variance = sum((x - mean) ** 2 for x in values) / (n - 1)
+    std_err = math.sqrt(variance / n)
+
+    df = n - 1
+    t_crit = t_critical(df, confidence)
+    margin = t_crit * std_err
+
+    return mean, mean - margin, mean + margin
+
+
+def calculate_p_value(values: List[float], null_hypothesis: float = 0.0) -> float:
+    """
+    Calculate p-value for one-sample t-test against null hypothesis.
+    Tests if the mean is significantly different from null_hypothesis.
+
+    Returns p-value (two-tailed).
+    """
+    n = len(values)
+    if n < 2:
+        return 1.0  # Cannot reject null with < 2 samples
+
+    mean = sum(values) / n
+    variance = sum((x - mean) ** 2 for x in values) / (n - 1)
+
+    if variance == 0:
+        return 0.0 if mean != null_hypothesis else 1.0
+
+    std_err = math.sqrt(variance / n)
+    t_stat = (mean - null_hypothesis) / std_err
+    df = n - 1
+
+    # Approximate p-value using t-distribution CDF approximation
+    # Using the approximation: p ≈ 2 * (1 - Φ(|t| * sqrt(df/(df-2+t²))))
+    # For simplicity, use a table-based approximation
+    abs_t = abs(t_stat)
+
+    # Rough p-value approximation based on t-statistic
+    if abs_t < 0.5:
+        p = 0.6
+    elif abs_t < 1.0:
+        p = 0.35
+    elif abs_t < 1.5:
+        p = 0.15
+    elif abs_t < 2.0:
+        p = 0.06
+    elif abs_t < 2.5:
+        p = 0.02
+    elif abs_t < 3.0:
+        p = 0.005
+    elif abs_t < 3.5:
+        p = 0.001
+    else:
+        p = 0.0005
+
+    # Adjust for degrees of freedom (smaller df = larger p)
+    if df < 10:
+        p *= (1 + (10 - df) * 0.05)
+
+    return min(p, 1.0)
 
 
 # -----------------------------------------------------------------------------
@@ -382,6 +484,8 @@ def build_expectancy_sql(plan: QueryPlan) -> str:
         f"ROUND(100.0 * SUM(CASE WHEN {plan.metric_col} > 0 THEN 1 ELSE 0 END) / COUNT(*), 2) AS win_rate",
         f"ROUND(AVG(CASE WHEN {plan.metric_col} > 0 THEN {plan.metric_col} END), 6) AS avg_win",
         f"ROUND(AVG(CASE WHEN {plan.metric_col} <= 0 THEN {plan.metric_col} END), 6) AS avg_loss",
+        # Collect individual values for CI calculation (using GROUP_CONCAT)
+        f"GROUP_CONCAT({plan.metric_col}, '|') AS _metric_values",
     ]
 
     # Add MFE/MAE only if the columns exist in the base table
@@ -435,18 +539,28 @@ class ExpectancyBucket:
     avg_loss: Optional[float]
     avg_mfe: Optional[float] = None
     avg_mae: Optional[float] = None
+    # Statistical fields
+    ci_lo: Optional[float] = None
+    ci_hi: Optional[float] = None
+    p_value: Optional[float] = None
+    metric_name: str = "pnl_after_costs_pct"
 
     def as_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
+        """Convert to dictionary for serialization with metric-aware headers."""
         result = dict(self.dimensions)
         result.update({
             "n_trades": self.n_trades,
-            "expectancy": self.expectancy,
+            f"avg_{self.metric_name}": self.expectancy,
             "total_pnl": self.total_pnl,
             "win_rate": self.win_rate,
-            "avg_win": self.avg_win,
-            "avg_loss": self.avg_loss,
+            f"avg_win_{self.metric_name}": self.avg_win,
+            f"avg_loss_{self.metric_name}": self.avg_loss,
+            # Always include CI and p-value fields for consistent output
+            f"ci_{self.metric_name}_lo": self.ci_lo,
+            f"ci_{self.metric_name}_hi": self.ci_hi,
+            f"p_value_{self.metric_name}": self.p_value,
         })
+        # Add MFE/MAE if available
         if self.avg_mfe is not None:
             result["avg_mfe"] = self.avg_mfe
         if self.avg_mae is not None:
@@ -506,6 +620,24 @@ def run_expectancy_analysis(
             alias = dim_names[i] if i < len(dim_names) else dim.lower()
             dim_values[alias] = str(row_dict.get(alias, "unknown"))
 
+        # Parse metric values for CI calculation
+        metric_values_str = row_dict.get("_metric_values", "")
+        metric_values = []
+        if metric_values_str:
+            for v in str(metric_values_str).split("|"):
+                try:
+                    metric_values.append(float(v))
+                except (ValueError, TypeError):
+                    pass
+
+        # Calculate CI and p-value
+        ci_lo, ci_hi, p_value = None, None, None
+        if len(metric_values) >= 2:
+            _, ci_lo, ci_hi = calculate_ci(metric_values)
+            ci_lo = round(ci_lo, 6)
+            ci_hi = round(ci_hi, 6)
+            p_value = round(calculate_p_value(metric_values), 4)
+
         bucket = ExpectancyBucket(
             dimensions=dim_values,
             n_trades=row_dict.get("n_trades", 0),
@@ -516,6 +648,10 @@ def run_expectancy_analysis(
             avg_loss=row_dict.get("avg_loss"),
             avg_mfe=row_dict.get("avg_mfe"),
             avg_mae=row_dict.get("avg_mae"),
+            ci_lo=ci_lo,
+            ci_hi=ci_hi,
+            p_value=p_value,
+            metric_name=metric,
         )
         results.append(bucket)
 
@@ -534,15 +670,15 @@ def format_table(results: List[ExpectancyBucket], dimensions: List[str], metric_
     lines = []
 
     # Header
-    lines.append("=" * 120)
+    lines.append("=" * 140)
     lines.append(f" EXPECTANCY CENSUS - Bucket Analysis (metric: {metric_name})")
-    lines.append("=" * 120)
+    lines.append("=" * 140)
     lines.append("")
 
     # Build header row
     dim_headers = [d[:12].upper() for d in dimensions]
     header = f"{'RANK':<5} " + " ".join(f"{h:<12}" for h in dim_headers)
-    header += f" {'TRADES':>7} {'EXPECT':>10} {'WIN%':>7} {'TOT_PNL':>10} {'AVG_WIN':>10} {'AVG_LOSS':>10}"
+    header += f" {'TRADES':>7} {'EXPECT':>10} {'CI_LO':>10} {'CI_HI':>10} {'P_VAL':>7} {'WIN%':>7} {'TOT_PNL':>10}"
 
     if results[0].avg_mfe is not None:
         header += f" {'AVG_MFE':>10} {'AVG_MAE':>10}"
@@ -558,12 +694,25 @@ def format_table(results: List[ExpectancyBucket], dimensions: List[str], metric_
 
         row += f" {bucket.n_trades:>7}"
         row += f" {bucket.expectancy:>+10.4f}%"
+
+        # CI values
+        if bucket.ci_lo is not None:
+            row += f" {bucket.ci_lo:>+10.4f}%"
+        else:
+            row += f" {'N/A':>11}"
+        if bucket.ci_hi is not None:
+            row += f" {bucket.ci_hi:>+10.4f}%"
+        else:
+            row += f" {'N/A':>11}"
+
+        # P-value
+        if bucket.p_value is not None:
+            row += f" {bucket.p_value:>7.4f}"
+        else:
+            row += f" {'N/A':>7}"
+
         row += f" {bucket.win_rate:>6.1f}%"
         row += f" {bucket.total_pnl:>+10.4f}%"
-
-        avg_win = f"{bucket.avg_win:>+10.4f}%" if bucket.avg_win else f"{'N/A':>11}"
-        avg_loss = f"{bucket.avg_loss:>+10.4f}%" if bucket.avg_loss else f"{'N/A':>11}"
-        row += f" {avg_win} {avg_loss}"
 
         if bucket.avg_mfe is not None:
             avg_mfe = f"{bucket.avg_mfe:>+10.4f}%" if bucket.avg_mfe else f"{'N/A':>11}"
@@ -581,12 +730,14 @@ def format_table(results: List[ExpectancyBucket], dimensions: List[str], metric_
 
     positive_buckets = sum(1 for b in results if b.expectancy > 0)
     negative_buckets = sum(1 for b in results if b.expectancy <= 0)
+    significant_buckets = sum(1 for b in results if b.p_value is not None and b.p_value < 0.05)
 
     lines.append("")
     lines.append(f"SUMMARY: {len(results)} buckets | {total_trades} total trades | "
                 f"Weighted Expectancy: {weighted_expectancy:+.4f}%")
     lines.append(f"         Positive expectancy: {positive_buckets} buckets | "
-                f"Negative expectancy: {negative_buckets} buckets")
+                f"Negative expectancy: {negative_buckets} buckets | "
+                f"Statistically significant (p<0.05): {significant_buckets} buckets")
     lines.append("")
 
     return "\n".join(lines)
