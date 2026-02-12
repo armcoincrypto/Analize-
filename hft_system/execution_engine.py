@@ -34,12 +34,17 @@ from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from .config import SYSTEM_CONFIG, TradingMode, get_asset_config, COST_MODEL
+from .config import SYSTEM_CONFIG, TradingMode, get_asset_config, COST_MODEL, MAKER_SCALPER
 from .signal_engine import Signal, SignalType
 from .risk_controller import RiskController, Position, RiskDecision
 from .websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
+
+
+class TakerViolationError(Exception):
+    """Raised when a taker fill occurs in maker-only mode."""
+    pass
 
 
 class ExitReason(Enum):
@@ -149,7 +154,84 @@ class ExecutionEngine:
         self.delta_negative_start: Dict[str, float] = {}  # When delta first turned negative
         self.delta_negative_duration: float = 3.0  # Require 3 seconds of negative delta
 
+        # ============================================================
+        # MAKER-ONLY MODE TRACKING
+        # ============================================================
+        self.taker_violation_active: bool = False  # True if entries are paused
+        self.taker_violation_time: float = 0  # When violation occurred
+        self.taker_violation_count: int = 0  # Total violations this session
+
+        # ============================================================
+        # ENHANCED MFE/MAE TRACKING
+        # ============================================================
+        # Track actual max/min prices seen for accurate MFE/MAE
+        self.position_max_price: Dict[str, float] = {}  # Max price seen during position
+        self.position_min_price: Dict[str, float] = {}  # Min price seen during position
+        self.position_last_update: Dict[str, float] = {}  # Last update timestamp
+
+        # ============================================================
+        # MAKER SCALPER STRATEGY TRACKING
+        # ============================================================
+        self.pending_entry_orders: Dict[str, dict] = {}  # symbol -> order info
+        self.pending_tp_orders: Dict[str, dict] = {}  # symbol -> TP order info
+        self.entry_order_placed_time: Dict[str, float] = {}  # symbol -> timestamp
+        self.tp_order_placed_time: Dict[str, float] = {}  # symbol -> timestamp
+        self.exit_attempt_start: Dict[str, float] = {}  # symbol -> timestamp for maker exit attempts
+
         logger.info(f"ExecutionEngine initialized in {self.mode.value} mode")
+        if COST_MODEL.maker_only:
+            logger.info("MAKER_ONLY mode: ENABLED - all entries must be post-only maker orders")
+        if COST_MODEL.cost_gating_enabled:
+            logger.info(f"COST_GATING: ENABLED - max expected costs: {COST_MODEL.max_expected_total_costs_pct*100:.4f}%")
+
+    def check_taker_violation_cooldown(self) -> tuple:
+        """Check if entries are paused due to taker violation.
+
+        Returns:
+            (is_paused, remaining_sec, message)
+        """
+        if not self.taker_violation_active:
+            return False, 0, None
+
+        elapsed = time.time() - self.taker_violation_time
+        remaining = COST_MODEL.taker_violation_cooldown_sec - elapsed
+
+        if remaining <= 0:
+            # Cooldown expired
+            self.taker_violation_active = False
+            logger.info("TAKER_VIOLATION: Cooldown expired, entries resumed")
+            return False, 0, None
+
+        return True, remaining, f"Taker violation cooldown: {remaining:.0f}s remaining"
+
+    def estimate_trade_costs(self, symbol: str, position_value: float) -> dict:
+        """Estimate pre-trade costs for cost gating.
+
+        Args:
+            symbol: Trading symbol
+            position_value: Size of position in USD
+
+        Returns:
+            Cost estimation dict from COST_MODEL.estimate_pre_trade_costs()
+        """
+        # Get current orderbook data
+        orderbook = self.ws.get_orderbook(symbol)
+
+        if orderbook:
+            current_spread_pct = orderbook.spread
+            # Estimate top-of-book depth in USD
+            top_bid_depth = sum(qty * price for price, qty in orderbook.bids[:3]) if orderbook.bids else 0
+            top_ask_depth = sum(qty * price for price, qty in orderbook.asks[:3]) if orderbook.asks else 0
+            top_of_book_depth = (top_bid_depth + top_ask_depth) / 2
+        else:
+            current_spread_pct = 0.05  # Conservative fallback
+            top_of_book_depth = 0
+
+        return COST_MODEL.estimate_pre_trade_costs(
+            current_spread_pct=current_spread_pct,
+            order_size_usd=position_value,
+            top_of_book_depth_usd=top_of_book_depth
+        )
 
     async def execute_entry(
         self,
@@ -178,6 +260,49 @@ class ExecutionEngine:
                 timestamp=int(time.time() * 1000),
                 error=risk_decision.message
             )
+
+        # ============================================================
+        # MAKER-ONLY CHECK: Block entries during taker violation cooldown
+        # ============================================================
+        if COST_MODEL.maker_only and COST_MODEL.pause_entries_on_taker_violation:
+            is_paused, remaining, msg = self.check_taker_violation_cooldown()
+            if is_paused:
+                logger.warning(f"ENTRY_BLOCKED: {signal.symbol} - {msg}")
+                return TradeResult(
+                    success=False,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    quantity=0,
+                    timestamp=int(time.time() * 1000),
+                    error=msg
+                )
+
+        # ============================================================
+        # COST GATING: Estimate costs and block if too high
+        # ============================================================
+        if COST_MODEL.cost_gating_enabled:
+            position_value = risk_decision.position_size * signal.entry_price
+            cost_estimate = self.estimate_trade_costs(signal.symbol, position_value)
+
+            if not cost_estimate["should_trade"]:
+                logger.warning(
+                    f"COST_GATE_BLOCK: {signal.symbol} | "
+                    f"expected_costs={cost_estimate['expected_total_costs_pct']*100:.4f}% > "
+                    f"max={cost_estimate['max_allowed_costs_pct']*100:.4f}% | "
+                    f"fee={cost_estimate['expected_fee_sum_pct']*100:.4f}%, "
+                    f"spread={cost_estimate['estimated_spread_cost_pct']*100:.4f}%, "
+                    f"slip={cost_estimate['estimated_slippage_pct']*100:.4f}%"
+                )
+                return TradeResult(
+                    success=False,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    quantity=0,
+                    timestamp=int(time.time() * 1000),
+                    error=f"Cost gating: expected {cost_estimate['expected_total_costs_pct']*100:.4f}% > max {cost_estimate['max_allowed_costs_pct']*100:.4f}%"
+                )
 
         if self.mode == TradingMode.PAPER:
             # Paper trading - instant fill
@@ -278,6 +403,11 @@ class ExecutionEngine:
         self.position_mfe[signal.symbol] = 0
         self.position_mae[signal.symbol] = 0
 
+        # ENHANCED MFE/MAE: Track actual max/min prices seen
+        self.position_max_price[signal.symbol] = fill_price
+        self.position_min_price[signal.symbol] = fill_price
+        self.position_last_update[signal.symbol] = time.time()
+
         # MICROSTRUCTURE: Capture entry conditions for event-based exits
         orderbook = self.ws.get_orderbook(signal.symbol)
         trade_flow = self.ws.get_trade_flow(signal.symbol)
@@ -328,6 +458,11 @@ class ExecutionEngine:
         """Execute paper trade entry with maker (limit order) simulation.
 
         Simulates posting a limit order, waiting for fill, and logging telemetry.
+
+        MAKER-ONLY MODE:
+        - Uses post-only order type
+        - If order would immediately fill as taker, it's rejected
+        - If maker-only mode and order times out, NO fallback to taker
         """
         # Get order book data
         if orderbook is None:
@@ -341,11 +476,23 @@ class ExecutionEngine:
         # Calculate limit price with offset inside the spread
         # For LONG: place bid slightly above best bid (inside spread)
         # For SHORT: place ask slightly below best ask (inside spread)
-        offset_bps = 0.5  # Default 0.5 bps inside spread
+        offset_bps = MAKER_SCALPER.entry_price_offset_bps if MAKER_SCALPER.enabled else 0.5
         if signal.signal_type == SignalType.LONG:
             limit_price = best_bid + (best_ask - best_bid) * (offset_bps / 100)
+            # POST-ONLY CHECK: Ensure we don't cross the spread
+            if COST_MODEL.post_only_enabled and limit_price >= best_ask:
+                logger.warning(
+                    f"POST_ONLY_REJECT: {signal.symbol} LONG limit ${limit_price:.6f} >= ask ${best_ask:.6f}"
+                )
+                limit_price = best_ask - (best_ask - best_bid) * 0.001  # Stay just inside
         else:
             limit_price = best_ask - (best_ask - best_bid) * (offset_bps / 100)
+            # POST-ONLY CHECK: Ensure we don't cross the spread
+            if COST_MODEL.post_only_enabled and limit_price <= best_bid:
+                logger.warning(
+                    f"POST_ONLY_REJECT: {signal.symbol} SHORT limit ${limit_price:.6f} <= bid ${best_bid:.6f}"
+                )
+                limit_price = best_bid + (best_ask - best_bid) * 0.001  # Stay just inside
 
         # Generate order ID
         order_id = f"MKR_{signal.symbol}_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
@@ -370,7 +517,8 @@ class ExecutionEngine:
             "best_ask": best_ask,
             "mid_price": mid_price,
             "spread_pct": spread_pct,
-            "queue_position_estimate": 0  # Simplified
+            "queue_position_estimate": 0,
+            "post_only": COST_MODEL.post_only_enabled
         }
         if self.trade_logger:
             self.trade_logger.log_maker_order_posted(
@@ -380,28 +528,75 @@ class ExecutionEngine:
                 limit_price=limit_price,
                 quantity=final_size,
                 market_data=market_data
-                # trade_id is intentionally omitted - trade doesn't exist yet
             )
+
+        # Track entry order for timeout handling
+        self.entry_order_placed_time[signal.symbol] = time.time()
+        self.pending_entry_orders[signal.symbol] = {
+            "order_id": order_id,
+            "limit_price": limit_price,
+            "quantity": final_size,
+            "side": signal.signal_type.value
+        }
 
         logger.info(
             f"MAKER ORDER POSTED: {signal.symbol} {signal.signal_type.value} | "
             f"Limit: ${limit_price:.6f} | Best bid/ask: ${best_bid:.6f}/${best_ask:.6f} | "
-            f"Spread: {spread_pct:.4f}%"
+            f"Spread: {spread_pct:.4f}% | post_only={COST_MODEL.post_only_enabled}"
         )
 
-        # Simulate wait for fill
-        wait_time_sec = COST_MODEL.maker_wait_seconds
+        # Simulate wait for fill with entry timeout
+        entry_timeout = MAKER_SCALPER.entry_timeout_sec if MAKER_SCALPER.enabled else COST_MODEL.maker_wait_seconds
         fill_probability = COST_MODEL.maker_fill_probability
 
         # Simulate fill check - random based on fill probability
-        # In real implementation, this would track price movement
-        await asyncio.sleep(min(wait_time_sec, 0.5))  # Don't actually wait full time in paper
+        await asyncio.sleep(min(entry_timeout, 0.5))  # Don't actually wait full time in paper
 
         filled = random.random() < fill_probability
+        filled_as_taker = False  # Track if we accidentally filled as taker
 
         if filled:
+            # Check if the fill was as taker (price moved through our limit)
+            # In paper mode, simulate ~5% chance of accidental taker fill
+            if random.random() < 0.05:
+                filled_as_taker = True
+                logger.warning(f"TAKER_VIOLATION_DETECTED: {signal.symbol} order filled as taker")
+
+            if filled_as_taker and COST_MODEL.maker_only and COST_MODEL.reject_taker_fills:
+                # Reject the taker fill - mark as violation
+                self.taker_violation_active = True
+                self.taker_violation_time = time.time()
+                self.taker_violation_count += 1
+
+                if self.trade_logger:
+                    self.trade_logger.log_maker_order_cancelled(
+                        order_id=order_id,
+                        cancel_reason="taker_fill_rejected",
+                        market_data=market_data,
+                        symbol=signal.symbol,
+                        side=signal.signal_type.value,
+                        limit_price=limit_price
+                    )
+
+                logger.error(
+                    f"TAKER_VIOLATION: {signal.symbol} | Order filled as taker, rejected | "
+                    f"Entries paused for {COST_MODEL.taker_violation_cooldown_sec}s | "
+                    f"Total violations: {self.taker_violation_count}"
+                )
+
+                return TradeResult(
+                    success=False,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    quantity=0,
+                    timestamp=int(time.time() * 1000),
+                    error="Taker fill rejected in maker-only mode"
+                )
+
             # Order filled - use limit price (no slippage for maker)
             fill_price = limit_price
+            actual_execution_mode = "taker" if filled_as_taker else "maker"
 
             # Log maker order filled
             if self.trade_logger:
@@ -410,7 +605,7 @@ class ExecutionEngine:
                     filled_quantity=final_size,
                     avg_fill_price=fill_price,
                     market_data=market_data,
-                    price_crossed_limit=False,
+                    price_crossed_limit=filled_as_taker,
                     cross_depth_bps=0,
                     symbol=signal.symbol,
                     side=signal.signal_type.value,
@@ -419,31 +614,52 @@ class ExecutionEngine:
 
             logger.info(
                 f"MAKER ORDER FILLED: {order_id} @ ${fill_price:.6f} | "
-                f"Qty: {final_size:.4f}"
+                f"Qty: {final_size:.4f} | mode={actual_execution_mode}"
             )
         else:
-            # Order not filled - log cancellation and fall back to taker
+            # Order not filled within timeout
             if self.trade_logger:
                 self.trade_logger.log_maker_order_cancelled(
                     order_id=order_id,
-                    cancel_reason="timeout_no_fill",
+                    cancel_reason="entry_timeout_no_fill",
                     market_data=market_data,
                     symbol=signal.symbol,
                     side=signal.signal_type.value,
                     limit_price=limit_price
                 )
 
+            # MAKER-ONLY MODE: Do NOT fall back to taker
+            if COST_MODEL.maker_only:
+                logger.info(
+                    f"MAKER ORDER CANCELLED (no fill): {order_id} | "
+                    f"MAKER_ONLY mode - no taker fallback"
+                )
+                # Clean up pending order
+                self.pending_entry_orders.pop(signal.symbol, None)
+                self.entry_order_placed_time.pop(signal.symbol, None)
+
+                return TradeResult(
+                    success=False,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    entry_price=signal.entry_price,
+                    quantity=0,
+                    timestamp=int(time.time() * 1000),
+                    error="Entry timeout - no maker fill"
+                )
+
+            # Legacy behavior: Fall back to taker execution (only if not maker-only)
             logger.info(
                 f"MAKER ORDER CANCELLED (no fill): {order_id} | Falling back to taker"
             )
-
-            # Fall back to taker execution
             slippage = signal.entry_price * 0.0002
             if signal.signal_type == SignalType.LONG:
                 fill_price = signal.entry_price + slippage
             else:
                 fill_price = signal.entry_price - slippage
             probe_label = probe_label.replace("MAKER", "MAKER->TAKER")
+            filled = True
+            actual_execution_mode = "taker"
 
         # Create position in risk controller
         signal.entry_price = fill_price
@@ -458,6 +674,11 @@ class ExecutionEngine:
         # Initialize MFE/MAE tracking
         self.position_mfe[signal.symbol] = 0
         self.position_mae[signal.symbol] = 0
+
+        # ENHANCED MFE/MAE: Track actual max/min prices seen
+        self.position_max_price[signal.symbol] = fill_price
+        self.position_min_price[signal.symbol] = fill_price
+        self.position_last_update[signal.symbol] = time.time()
 
         # Capture entry conditions
         trade_flow = self.ws.get_trade_flow(signal.symbol)
@@ -475,8 +696,11 @@ class ExecutionEngine:
         self.time_of_delta_flip[signal.symbol] = 0
         self.ob_decay_amount[signal.symbol] = 0
 
-        # Determine execution mode based on whether order filled as maker or fell back to taker
-        actual_execution_mode = "maker" if filled else "taker"
+        # Clean up pending entry order tracking
+        self.pending_entry_orders.pop(signal.symbol, None)
+        self.entry_order_placed_time.pop(signal.symbol, None)
+
+        # actual_execution_mode is already set above
 
         result = TradeResult(
             success=True,
@@ -511,6 +735,74 @@ class ExecutionEngine:
         # TODO: Implement actual exchange order submission
         logger.warning("LIVE trading not implemented - using paper mode")
         return await self._paper_entry(signal, risk_decision, is_cause_probe)
+
+    def update_mfe_mae_from_price(self, symbol: str, current_price: float):
+        """
+        Update MFE/MAE tracking from a price tick.
+
+        This method should be called on every price update from websocket
+        for accurate MFE/MAE tracking. This fixes the zero MFE/MAE issue.
+
+        Args:
+            symbol: Trading symbol
+            current_price: Current price from websocket tick
+        """
+        position = self.risk.get_position(symbol)
+        if not position:
+            return
+
+        # Update max/min price tracking
+        if symbol in self.position_max_price:
+            if current_price > self.position_max_price[symbol]:
+                self.position_max_price[symbol] = current_price
+            if current_price < self.position_min_price[symbol]:
+                self.position_min_price[symbol] = current_price
+            self.position_last_update[symbol] = time.time()
+
+            # Recalculate MFE/MAE from price extremes
+            max_seen = self.position_max_price[symbol]
+            min_seen = self.position_min_price[symbol]
+
+            if position.side == SignalType.LONG:
+                # LONG: MFE = (max_seen - entry) / entry
+                price_based_mfe = (max_seen - position.entry_price) / position.entry_price * 100
+                price_based_mae = (min_seen - position.entry_price) / position.entry_price * 100
+            else:
+                # SHORT: MFE = (entry - min_seen) / entry
+                price_based_mfe = (position.entry_price - min_seen) / position.entry_price * 100
+                price_based_mae = (position.entry_price - max_seen) / position.entry_price * 100
+
+            # Update MFE if more favorable
+            if symbol in self.position_mfe and price_based_mfe > self.position_mfe[symbol]:
+                self.position_mfe[symbol] = price_based_mfe
+                if symbol in self.entry_time:
+                    self.time_of_mfe[symbol] = time.time() - self.entry_time[symbol]
+
+            # Update MAE if more adverse
+            if symbol in self.position_mae and price_based_mae < self.position_mae[symbol]:
+                self.position_mae[symbol] = price_based_mae
+                if symbol in self.entry_time:
+                    self.time_of_mae[symbol] = time.time() - self.entry_time[symbol]
+
+    async def poll_mfe_mae_fallback(self, symbols: list, interval_sec: float = 1.0):
+        """
+        REST polling fallback for MFE/MAE tracking when websocket is unavailable.
+
+        Should be run as a background task if websocket price updates aren't reliable.
+        """
+        while True:
+            try:
+                for symbol in symbols:
+                    if self.risk.has_position(symbol):
+                        current_price = self.ws.get_current_price(symbol)
+                        if current_price:
+                            self.update_mfe_mae_from_price(symbol, current_price)
+                await asyncio.sleep(interval_sec)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"MFE/MAE polling error: {e}")
+                await asyncio.sleep(interval_sec)
 
     async def check_exits(self):
         """
@@ -609,16 +901,58 @@ class ExecutionEngine:
         else:
             pnl_pct = (position.entry_price - current_price) / position.entry_price * 100
 
-        # Update MFE/MAE (with defensive checks for both dicts)
+        # ============================================================
+        # ENHANCED MFE/MAE TRACKING
+        # ============================================================
+        # Track both:
+        # 1. Max/min prices seen (for accurate price-based MFE/MAE)
+        # 2. PnL-based MFE/MAE (as percentage)
+        # This fixes the zero MFE/MAE issue by properly tracking price extremes.
+        # ============================================================
+
+        # Update max/min price tracking
+        if position.symbol in self.position_max_price:
+            if current_price > self.position_max_price[position.symbol]:
+                self.position_max_price[position.symbol] = current_price
+            if current_price < self.position_min_price[position.symbol]:
+                self.position_min_price[position.symbol] = current_price
+            self.position_last_update[position.symbol] = time.time()
+
+        # Calculate MFE/MAE from actual price extremes
+        if position.symbol in self.position_max_price and position.symbol in self.position_min_price:
+            max_seen = self.position_max_price[position.symbol]
+            min_seen = self.position_min_price[position.symbol]
+
+            if position.side == SignalType.LONG:
+                # LONG: MFE = (max_seen - entry) / entry, MAE = (min_seen - entry) / entry (negative)
+                price_based_mfe = (max_seen - position.entry_price) / position.entry_price * 100
+                price_based_mae = (min_seen - position.entry_price) / position.entry_price * 100
+            else:
+                # SHORT: MFE = (entry - min_seen) / entry, MAE = (entry - max_seen) / entry (negative)
+                price_based_mfe = (position.entry_price - min_seen) / position.entry_price * 100
+                price_based_mae = (position.entry_price - max_seen) / position.entry_price * 100
+
+            # Update MFE/MAE if price-based values are more extreme
+            if position.symbol in self.position_mfe:
+                if price_based_mfe > self.position_mfe[position.symbol]:
+                    self.position_mfe[position.symbol] = price_based_mfe
+                    if position.symbol in self.entry_time:
+                        self.time_of_mfe[position.symbol] = time.time() - self.entry_time[position.symbol]
+
+            if position.symbol in self.position_mae:
+                if price_based_mae < self.position_mae[position.symbol]:
+                    self.position_mae[position.symbol] = price_based_mae
+                    if position.symbol in self.entry_time:
+                        self.time_of_mae[position.symbol] = time.time() - self.entry_time[position.symbol]
+
+        # Fallback: Also update from current PnL (defensive)
         if position.symbol in self.position_mfe and position.symbol in self.position_mae:
             if pnl_pct > self.position_mfe[position.symbol]:
                 self.position_mfe[position.symbol] = pnl_pct
-                # TASK 9: Record time of MFE (max favorable excursion)
                 if position.symbol in self.entry_time:
                     self.time_of_mfe[position.symbol] = time.time() - self.entry_time[position.symbol]
             if pnl_pct < self.position_mae[position.symbol]:
                 self.position_mae[position.symbol] = pnl_pct
-                # Record time of MAE (max adverse excursion)
                 if position.symbol in self.entry_time:
                     self.time_of_mae[position.symbol] = time.time() - self.entry_time[position.symbol]
 
@@ -875,6 +1209,18 @@ class ExecutionEngine:
 
         # Clean up softened delta tracking
         self.delta_negative_start.pop(position.symbol, None)
+
+        # Clean up enhanced MFE/MAE tracking
+        self.position_max_price.pop(position.symbol, None)
+        self.position_min_price.pop(position.symbol, None)
+        self.position_last_update.pop(position.symbol, None)
+
+        # Clean up maker scalper tracking
+        self.pending_entry_orders.pop(position.symbol, None)
+        self.pending_tp_orders.pop(position.symbol, None)
+        self.entry_order_placed_time.pop(position.symbol, None)
+        self.tp_order_placed_time.pop(position.symbol, None)
+        self.exit_attempt_start.pop(position.symbol, None)
 
         # Close in risk controller
         self.risk.close_position(position.symbol, fill_price, reason.value)

@@ -785,21 +785,52 @@ class TradeLogger:
 
     def log_trade_exit(self, result: ExitResult, mfe: float = 0, mae: float = 0,
                         spread_at_exit: float = 0, imbalance_at_exit: float = 0.5,
-                        pocket_id: str = None):
-        """Log trade exit and update trade record with realistic cost model."""
+                        pocket_id: str = None, execution_mode: str = None):
+        """Log trade exit and update trade record with realistic cost model.
+
+        Args:
+            result: ExitResult with trade details
+            mfe: Max favorable excursion (percentage)
+            mae: Max adverse excursion (percentage)
+            spread_at_exit: Spread at exit time
+            imbalance_at_exit: Orderbook imbalance at exit
+            pocket_id: Which pocket allowed this trade
+            execution_mode: Override execution mode (maker/taker) for cost calculation
+        """
         try:
             cursor = self.conn.cursor()
 
-            # Calculate realistic trading costs
+            # Determine actual execution mode for cost calculation
+            # This uses: 1) explicit override, 2) result's mode, 3) config mode
+            actual_mode = execution_mode
+            if actual_mode is None:
+                actual_mode = getattr(result, 'execution_mode', None)
+            if actual_mode is None:
+                actual_mode = COST_MODEL.execution_mode
+            if actual_mode == "auto":
+                actual_mode = "taker"  # Default for auto mode
+
+            # Calculate realistic trading costs based on actual execution mode
             if COST_MODEL.enabled:
-                entry_fee = COST_MODEL.entry_fee_pct
-                exit_fee = COST_MODEL.exit_fee_pct
+                # Use mode-specific costs for accurate tracking
+                if actual_mode == "maker":
+                    entry_fee = COST_MODEL.maker_entry_fee_pct
+                    exit_fee = COST_MODEL.maker_exit_fee_pct
+                    spread_cost = COST_MODEL.maker_spread_cost_pct
+                else:  # taker
+                    entry_fee = COST_MODEL.taker_entry_fee_pct
+                    exit_fee = COST_MODEL.taker_exit_fee_pct
+                    spread_cost = COST_MODEL.taker_spread_cost_pct
                 fees_paid = entry_fee + exit_fee  # Combined fees
-                spread_cost = COST_MODEL.spread_cost_pct
 
                 # Slippage: higher when imbalance is extreme (OB looks good but disappears)
+                # For maker orders, use maker-specific (typically lower) slippage
+                if actual_mode == "maker":
+                    base_slippage = COST_MODEL.maker_slippage_pct
+                else:
+                    base_slippage = COST_MODEL.taker_slippage_pct
                 imbalance_extremity = abs(imbalance_at_exit - 0.5) * 2  # 0 to 1
-                slippage = COST_MODEL.base_slippage_pct + (
+                slippage = base_slippage + (
                     imbalance_extremity * COST_MODEL.imbalance_slippage_factor
                 )
 
@@ -815,16 +846,8 @@ class TradeLogger:
                 total_costs = 0
                 pnl_after_costs = result.pnl_pct
 
-            # Get execution mode for logging (handle "auto" mode)
-            if COST_MODEL.enabled:
-                execution_mode = COST_MODEL.execution_mode
-                # If auto mode, we'd need the spread at exit to determine actual mode
-                # For now, log the configured mode - actual mode is determined at entry
-                if execution_mode == "auto":
-                    # Default to taker for auto mode logging (actual decision made at entry)
-                    execution_mode = "taker"
-            else:
-                execution_mode = "taker"
+            # Use actual_mode determined above for consistent logging
+            logged_execution_mode = actual_mode
 
             # Update trade with exit info and costs
             # NOTE: Do NOT overwrite execution_mode - it was set correctly at entry
@@ -867,7 +890,7 @@ class TradeLogger:
                 total_costs,
                 pnl_after_costs,
                 pocket_id,
-                execution_mode,
+                logged_execution_mode,
                 result.symbol
             ))
 

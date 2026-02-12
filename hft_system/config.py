@@ -158,6 +158,49 @@ class CostModelConfig:
     min_profit_multiple_of_cost: float = 2.0  # Exit profit must be 2x the expected cost
     min_profit_floor_pct: float = 0.20  # Absolute minimum profit % for any exit
 
+    # ============================================================
+    # MAKER-ONLY MODE - Hard requirement for profitability
+    # ============================================================
+    # Enable via: MAKER_ONLY=true or MAKER_ONLY=1 environment variable
+    # When enabled:
+    # - All entry orders MUST be post-only maker orders
+    # - Taker fills are logged as rule violations
+    # - Emergency taker exits allowed only if MAX_EMERGENCY_TAKER_EXIT=true
+    maker_only: bool = True  # Default: enforce maker-only for profitability
+
+    # Post-only order settings
+    post_only_enabled: bool = True  # Use exchange post-only flag
+    reject_taker_fills: bool = True  # Reject orders that would immediately fill as taker
+
+    # When taker fill detected (rule violation)
+    pause_entries_on_taker_violation: bool = True  # Disable entries until next cycle
+    taker_violation_cooldown_sec: float = 300.0  # 5 minutes cooldown after violation
+
+    # Emergency taker exit settings
+    max_emergency_taker_exit: bool = False  # Allow taker exits in emergencies
+    emergency_exit_grace_period_sec: float = 30.0  # Try maker exit for this long first
+    emergency_exit_mae_threshold_pct: float = -0.12  # Only allow emergency exit if MAE <= this
+
+    # ============================================================
+    # COST GATING - Pre-trade cost estimation
+    # ============================================================
+    # Block trades where expected costs exceed threshold
+    cost_gating_enabled: bool = True
+
+    # Maximum expected total costs before rejecting trade
+    # Note: Values are in percentage form (0.06 = 0.06%, not decimal)
+    max_expected_total_costs_pct: float = 0.06  # 0.06% max expected costs
+
+    # Cost estimation parameters
+    # For maker: use maker fees (0.02% round-trip) + half-spread estimate
+    # For taker: use taker fees (0.20%) + full spread + slippage
+    spread_cost_multiplier_maker: float = 0.5  # Half-spread for maker orders
+    spread_cost_multiplier_taker: float = 1.0  # Full spread for taker orders
+
+    # Slippage estimation based on order size vs book depth
+    slippage_estimate_per_depth_ratio: float = 0.01  # 1% slippage per 100% of top-of-book depth
+    default_slippage_estimate_pct: float = 0.001  # 0.001% fallback slippage estimate
+
     def get_required_profit_pct(self, execution_mode: str = None) -> float:
         """
         Calculate minimum profit % required for a profitable exit.
@@ -171,6 +214,73 @@ class CostModelConfig:
         mode = execution_mode or self.execution_mode
         cost = self.get_total_round_trip_cost(mode)
         return max(self.min_profit_floor_pct, cost * self.min_profit_multiple_of_cost)
+
+    def estimate_pre_trade_costs(
+        self,
+        current_spread_pct: float,
+        order_size_usd: float = 0,
+        top_of_book_depth_usd: float = 0,
+        execution_mode: str = None
+    ) -> dict:
+        """
+        Estimate expected costs BEFORE placing a trade.
+
+        Args:
+            current_spread_pct: Current bid-ask spread as percentage
+            order_size_usd: Size of order in USD (for slippage estimation)
+            top_of_book_depth_usd: Depth at top of book (for slippage estimation)
+            execution_mode: "maker" or "taker" (defaults to maker_only setting)
+
+        Returns:
+            Dict with: expected_fee_sum_pct, estimated_spread_cost_pct,
+                      estimated_slippage_pct, expected_total_costs_pct,
+                      should_trade (True if costs below threshold)
+        """
+        # Determine execution mode
+        if execution_mode is None:
+            mode = "maker" if self.maker_only else self.execution_mode
+        else:
+            mode = execution_mode
+
+        # Calculate expected fees
+        if mode == "maker":
+            expected_fee_sum_pct = self.maker_entry_fee_pct + self.maker_exit_fee_pct
+            spread_multiplier = self.spread_cost_multiplier_maker
+            base_slippage = self.maker_slippage_pct
+        else:
+            expected_fee_sum_pct = self.taker_entry_fee_pct + self.taker_exit_fee_pct
+            spread_multiplier = self.spread_cost_multiplier_taker
+            base_slippage = self.taker_slippage_pct
+
+        # Estimate spread cost (entry + exit)
+        estimated_spread_cost_pct = current_spread_pct * spread_multiplier * 2
+
+        # Estimate slippage based on order size vs book depth
+        if order_size_usd > 0 and top_of_book_depth_usd > 0:
+            depth_ratio = order_size_usd / top_of_book_depth_usd
+            estimated_slippage_pct = base_slippage + (depth_ratio * self.slippage_estimate_per_depth_ratio)
+        else:
+            estimated_slippage_pct = base_slippage + self.default_slippage_estimate_pct
+
+        # Total expected costs
+        expected_total_costs_pct = expected_fee_sum_pct + estimated_spread_cost_pct + estimated_slippage_pct
+
+        # Determine if trade should proceed
+        should_trade = not self.cost_gating_enabled or expected_total_costs_pct <= self.max_expected_total_costs_pct
+
+        return {
+            "expected_fee_sum_pct": expected_fee_sum_pct,
+            "estimated_spread_cost_pct": estimated_spread_cost_pct,
+            "estimated_slippage_pct": estimated_slippage_pct,
+            "expected_total_costs_pct": expected_total_costs_pct,
+            "max_allowed_costs_pct": self.max_expected_total_costs_pct,
+            "should_trade": should_trade,
+            "execution_mode": mode
+        }
+
+    def is_maker_only_mode(self) -> bool:
+        """Check if maker-only mode is enforced."""
+        return self.maker_only and self.post_only_enabled
 
     @property
     def entry_fee_pct(self) -> float:
@@ -509,6 +619,52 @@ class RuntimeAlarmsConfig:
 
 
 RUNTIME_ALARMS = RuntimeAlarmsConfig()
+
+
+# ============================================================
+# MAKER SCALPER STRATEGY — Micro-profit or Cancel
+# ============================================================
+# A maker-only strategy designed for profitability:
+# - Entry: Post-only maker order at bid/ask
+# - If not filled within timeout: cancel and log "no_fill"
+# - If filled: place TP maker order at entry*(1+TP_PCT)
+# - If TP not hit within hold timeout: attempt maker exit near breakeven
+# - Hard stop: if MAE <= -SL_PCT, attempt maker stop-exit
+# ============================================================
+@dataclass
+class MakerScalperConfig:
+    """Maker scalper strategy configuration."""
+
+    # Master switch
+    enabled: bool = True
+
+    # Entry settings
+    entry_timeout_sec: float = 25.0  # Cancel entry if not filled within this time
+    entry_price_offset_bps: float = 0.5  # Place entry inside spread by this amount (bps)
+
+    # Take profit settings
+    tp_pct: float = 0.0007  # 0.07% take profit target (7 bps)
+    tp_order_timeout_sec: float = 35.0  # Time to wait for TP fill
+
+    # Hold timeout settings
+    hold_timeout_sec: float = 35.0  # Max time to hold position
+    breakeven_exit_offset_bps: float = 1.0  # Place exit this far from breakeven (bps)
+
+    # Stop loss settings
+    sl_pct: float = 0.0012  # 0.12% stop loss (12 bps)
+    sl_use_maker_first: bool = True  # Try maker stop-exit first
+    sl_maker_timeout_sec: float = 5.0  # Time to wait for maker stop fill
+    sl_allow_taker_emergency: bool = False  # Allow taker exit if maker fails at SL
+
+    # MFE/MAE tracking intervals
+    mfe_mae_update_interval_ms: float = 100  # Update every 100ms
+
+    # Logging
+    log_every_fill: bool = True
+    log_every_cancel: bool = True
+
+
+MAKER_SCALPER = MakerScalperConfig()
 
 
 # Global configs
