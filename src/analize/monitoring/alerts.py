@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from analize.config import get_settings
 from analize.monitoring.drift import DriftAlert, DriftSeverity
+from analize.utils.time import utcnow, utcnow_iso
 
 
 class AlertChannel(str, Enum):
@@ -63,7 +64,7 @@ class AlertRule:
 
         # Check cooldown
         if self.last_triggered:
-            elapsed = (datetime.utcnow() - self.last_triggered).total_seconds() / 60
+            elapsed = (utcnow() - self.last_triggered).total_seconds() / 60
             if elapsed < self.cooldown_minutes:
                 return False
 
@@ -258,7 +259,7 @@ class AlertManager:
                 }
                 for rule_id, rule in self.rules.items()
             },
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": utcnow_iso(),
         }
 
         state_file = self.storage_path / "alert_state.json"
@@ -339,7 +340,7 @@ class AlertManager:
                 notification_status[channel.value] = False
 
         # Update rule state
-        rule.last_triggered = datetime.utcnow()
+        rule.last_triggered = utcnow()
         rule.trigger_count_today += 1
 
         # Create alert record
@@ -347,7 +348,7 @@ class AlertManager:
             alert_id=alert_id,
             rule_id=rule.rule_id,
             rule_name=rule.name,
-            fired_at=datetime.utcnow(),
+            fired_at=utcnow(),
             severity=rule.severity,
             message=message,
             metric_value=value,
@@ -383,12 +384,12 @@ class AlertManager:
             f"Metric: {rule.metric}\n"
             f"Current Value: {value:.4f}\n"
             f"Threshold: {rule.threshold:.4f} ({condition_text.get(rule.condition, rule.condition)})\n"
-            f"Time: {datetime.utcnow().isoformat()}"
+            f"Time: {utcnow_iso()}"
         )
 
     def _save_alert_history(self, alert: FiredAlert) -> None:
         """Save alert to history file."""
-        history_file = self.storage_path / f"alerts_{datetime.utcnow().strftime('%Y%m%d')}.json"
+        history_file = self.storage_path / f"alerts_{utcnow().strftime('%Y%m%d')}.json"
 
         history = []
         if history_file.exists():
@@ -439,7 +440,7 @@ class AlertManager:
 
     def get_active_alerts(self, hours: int = 24) -> list[dict[str, Any]]:
         """Get alerts from the last N hours."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = utcnow() - timedelta(hours=hours)
         return [
             {
                 "alert_id": a.alert_id,
@@ -454,7 +455,7 @@ class AlertManager:
 
     def get_statistics(self) -> dict[str, Any]:
         """Get alert statistics."""
-        now = datetime.utcnow()
+        now = utcnow()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=7)
 

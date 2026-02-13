@@ -18,6 +18,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from analize.models.signals import Signal, SignalRecord
+from analize.utils.time import utcnow
 
 
 class FileIngestor:
@@ -181,7 +182,7 @@ class FileIngestor:
                 record_data = {
                     "signal_id": row.get("signal_id", str(hash(str(row)))),
                     "timestamp_utc": pd.to_datetime(
-                        row.get("timestamp_utc", row.get("timestamp", datetime.utcnow()))
+                        row.get("timestamp_utc", row.get("timestamp", utcnow()))
                     ),
                     "symbol": str(row.get("symbol", "UNKNOWN")),
                     "timeframe": str(row.get("timeframe", "1m")),

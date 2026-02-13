@@ -11,6 +11,7 @@ from analize.optimizer.execution_model import (
     OrderType,
     RealisticExecutionModel,
 )
+from analize.utils.time import utcnow
 
 
 class TestExchangeRules:
@@ -229,7 +230,7 @@ class TestExecutionResult:
             slippage_pct=0.05,
             commission=4.5,
             commission_asset="USDT",
-            execution_time=datetime.utcnow(),
+            execution_time=utcnow(),
             latency_ms=50.0,
             is_partial=False,
             is_rejected=False,
@@ -253,7 +254,7 @@ class TestExecutionResult:
             slippage_pct=0.05,
             commission=4.5,
             commission_asset="USDT",
-            execution_time=datetime.utcnow(),
+            execution_time=utcnow(),
             latency_ms=50.0,
             is_partial=True,
             is_rejected=False,
@@ -276,7 +277,7 @@ class TestExecutionResult:
             slippage_pct=0.05,
             commission=4.5,  # Commission
             commission_asset="USDT",
-            execution_time=datetime.utcnow(),
+            execution_time=utcnow(),
             latency_ms=50.0,
             is_partial=False,
             is_rejected=False,

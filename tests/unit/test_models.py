@@ -24,6 +24,7 @@ from analize.models.reports import (
     SymbolSummary,
 )
 from analize.models.jobs import Job, JobCreate, JobStatus, JobType
+from analize.utils.time import utcnow
 
 
 class TestCandleData:
@@ -32,7 +33,7 @@ class TestCandleData:
     def test_candle_creation(self) -> None:
         """Test creating a candle."""
         candle = CandleData(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             open=100.0,
             high=105.0,
             low=98.0,
@@ -49,7 +50,7 @@ class TestCandleData:
     def test_candle_body_pct(self) -> None:
         """Test candle body percentage calculation."""
         candle = CandleData(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             open=100.0,
             high=110.0,
             low=90.0,
@@ -65,14 +66,14 @@ class TestCandleData:
         """Test candle color determination."""
         # Bullish candle
         green = CandleData(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             open=100.0, high=110.0, low=95.0, close=108.0, volume=100.0
         )
         assert green.color == CandleColor.GREEN
 
         # Bearish candle
         red = CandleData(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             open=100.0, high=105.0, low=90.0, close=92.0, volume=100.0
         )
         assert red.color == CandleColor.RED
@@ -84,7 +85,7 @@ class TestOrderbookSnapshot:
     def test_spread_calculation(self) -> None:
         """Test spread calculation."""
         ob = OrderbookSnapshot(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             symbol="BTCUSDT",
             bids=[OrderbookLevel(price=100.0, quantity=10.0)],
             asks=[OrderbookLevel(price=100.1, quantity=10.0)],
@@ -97,7 +98,7 @@ class TestOrderbookSnapshot:
     def test_imbalance_calculation(self) -> None:
         """Test orderbook imbalance calculation."""
         ob = OrderbookSnapshot(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             symbol="BTCUSDT",
             bids=[
                 OrderbookLevel(price=100.0, quantity=100.0),
@@ -120,7 +121,7 @@ class TestSignalRecord:
         """Test creating a signal record."""
         record = SignalRecord(
             signal_id=uuid4(),
-            timestamp_utc=datetime.utcnow(),
+            timestamp_utc=utcnow(),
             symbol="BTCUSDT",
             mode=TradingMode.LIVE,
             price_open=50000.0,
@@ -137,7 +138,7 @@ class TestSignalRecord:
         """Test converting to flat dictionary."""
         record = SignalRecord(
             signal_id=uuid4(),
-            timestamp_utc=datetime.utcnow(),
+            timestamp_utc=utcnow(),
             symbol="BTCUSDT",
             mode=TradingMode.LIVE,
             price_open=50000.0,

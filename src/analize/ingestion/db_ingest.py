@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from analize.config import get_settings
+from analize.utils.time import utcnow
 from analize.models.signals import (
     CandleData,
     ExecutionData,
@@ -255,7 +256,7 @@ class ScalperBotDBIngestor:
         try:
             # Create candle data (placeholder - actual data should come from market data)
             candle = CandleData(
-                timestamp=trade_row.get("created_at", datetime.utcnow()),
+                timestamp=trade_row.get("created_at", utcnow()),
                 open=float(trade_row.get("entry_price", 0)),
                 high=float(trade_row.get("entry_price", 0)),
                 low=float(trade_row.get("entry_price", 0)),
@@ -297,7 +298,7 @@ class ScalperBotDBIngestor:
             # Create signal
             signal = Signal(
                 signal_id=uuid4(),
-                timestamp_utc=trade_row.get("created_at", datetime.utcnow()),
+                timestamp_utc=trade_row.get("created_at", utcnow()),
                 symbol=str(trade_row.get("symbol", "UNKNOWN")),
                 pair_id=str(trade_row.get("pair_id", "")),
                 timeframe="1m",

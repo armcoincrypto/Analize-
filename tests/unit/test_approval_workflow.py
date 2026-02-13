@@ -13,6 +13,7 @@ from analize.approval.workflow import (
 )
 from analize.approval.patch_generator import PatchGenerator
 from analize.models.reports import ParameterSuggestion, ConfidenceLevel
+from analize.utils.time import utcnow
 
 
 class TestApprovalStatus:
@@ -171,7 +172,7 @@ class TestPatchGenerator:
             target_symbol="BTC/USDT",
             status=ApprovalStatus.APPROVED,
             approved_by="trader1",
-            approved_at=datetime.utcnow(),
+            approved_at=utcnow(),
         )
 
     def test_generate_patch(

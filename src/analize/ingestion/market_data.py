@@ -17,6 +17,7 @@ import pandas as pd
 
 from analize.config import get_settings
 from analize.models.signals import CandleData, OrderbookLevel, OrderbookSnapshot
+from analize.utils.time import utcnow
 
 
 class MarketDataIngestor:
@@ -224,7 +225,7 @@ class MarketDataIngestor:
         ]
 
         return OrderbookSnapshot(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             symbol=symbol.upper(),
             bids=bids,
             asks=asks,

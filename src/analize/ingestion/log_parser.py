@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Generator, TextIO
 
 from analize.models.signals import FilterResult, PolicyMode
+from analize.utils.time import utcnow
 
 
 @dataclass
@@ -129,7 +130,7 @@ class LogParser:
             try:
                 timestamp = datetime.fromisoformat(groups["timestamp"].replace(" ", "T"))
             except ValueError:
-                timestamp = datetime.utcnow()
+                timestamp = utcnow()
 
             return LogEntry(
                 timestamp=timestamp,
@@ -146,7 +147,7 @@ class LogParser:
             try:
                 timestamp = datetime.fromisoformat(groups["timestamp"].replace(" ", "T"))
             except ValueError:
-                timestamp = datetime.utcnow()
+                timestamp = utcnow()
 
             return LogEntry(
                 timestamp=timestamp,
@@ -158,7 +159,7 @@ class LogParser:
 
         # Unknown format - still return as entry
         return LogEntry(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             level="UNKNOWN",
             logger="",
             message=line,

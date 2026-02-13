@@ -17,6 +17,7 @@ from analize.config import get_settings
 from analize.models.reports import OptimizationObjective, OptimizationResult, ParameterSuggestion
 from analize.models.signals import SignalRecord
 from analize.optimizer.simulator import SimulationResult, TradingSimulator
+from analize.utils.time import utcnow
 
 
 @dataclass
@@ -113,7 +114,7 @@ class GridSearchOptimizer:
         total = len(combinations)
 
         results = []
-        started_at = datetime.utcnow()
+        started_at = utcnow()
 
         for i, params in enumerate(combinations):
             if progress_callback:
@@ -144,7 +145,7 @@ class GridSearchOptimizer:
         return OptimizationResult(
             optimization_id=uuid4(),
             started_at=started_at,
-            completed_at=datetime.utcnow(),
+            completed_at=utcnow(),
             objective=self.objective,
             symbols=list(set(s.symbol for s in signals)),
             date_range_start=min(s.timestamp_utc for s in signals).date(),
@@ -189,7 +190,7 @@ class GridSearchOptimizer:
         total = len(combinations)
 
         results = []
-        started_at = datetime.utcnow()
+        started_at = utcnow()
 
         for params in combinations:
             tp_pct = params.get("tp_pct", 2.0)
@@ -222,7 +223,7 @@ class GridSearchOptimizer:
         return OptimizationResult(
             optimization_id=uuid4(),
             started_at=started_at,
-            completed_at=datetime.utcnow(),
+            completed_at=utcnow(),
             objective=self.objective,
             symbols=list(set(s.symbol for s in signals)),
             date_range_start=min(s.timestamp_utc for s in signals).date(),

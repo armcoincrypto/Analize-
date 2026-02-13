@@ -12,7 +12,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from analize.utils.time import utcnow
 
 
 class JobType(str, Enum):
@@ -126,7 +128,7 @@ class Job(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
 
     # Timing
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
     scheduled_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -153,8 +155,7 @@ class Job(BaseModel):
     data_hash: str | None = None
     code_version: str | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     @property
     def is_terminal(self) -> bool:
@@ -166,7 +167,7 @@ class Job(BaseModel):
         """Get job duration in seconds."""
         if self.started_at is None:
             return None
-        end = self.completed_at or datetime.utcnow()
+        end = self.completed_at or utcnow()
         return (end - self.started_at).total_seconds()
 
 

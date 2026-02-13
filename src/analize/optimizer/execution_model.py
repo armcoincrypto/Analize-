@@ -17,6 +17,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from analize.utils.time import utcnow
+
 
 class OrderType(str, Enum):
     """Order type."""
@@ -369,7 +371,7 @@ class RealisticExecutionModel:
         """
         self._order_counter += 1
         order_id = f"SIM-{self._order_counter:06d}"
-        timestamp = timestamp or datetime.utcnow()
+        timestamp = timestamp or utcnow()
         rules = self.get_rules(symbol)
 
         # Round quantity
@@ -524,7 +526,7 @@ class RealisticExecutionModel:
             high = row["high"]
             low = row["low"]
             close = row["close"]
-            timestamp = row.get("timestamp", datetime.utcnow())
+            timestamp = row.get("timestamp", utcnow())
 
             # Track MFE/MAE
             high_pnl = (high - actual_entry) / actual_entry * 100

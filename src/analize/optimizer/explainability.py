@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from analize.features.indicators import TechnicalIndicators
+from analize.utils.time import utcnow
 
 
 @dataclass
@@ -71,7 +72,7 @@ class SuggestionExplanation:
     # Generated explanation text
     explanation_text: str
 
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utcnow)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -216,7 +217,7 @@ class SuggestionExplainer:
         )
 
         # Create suggestion ID
-        suggestion_id = f"EXPL-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        suggestion_id = f"EXPL-{utcnow().strftime('%Y%m%d%H%M%S')}"
 
         return SuggestionExplanation(
             suggestion_id=suggestion_id,

@@ -12,7 +12,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from analize.utils.time import utcnow
 
 
 class TradingMode(str, Enum):
@@ -302,10 +304,9 @@ class Signal(SignalBase):
     execution: ExecutionData | None = None
     notes: str | None = None
 
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SignalRecord(BaseModel):
@@ -405,10 +406,9 @@ class SignalRecord(BaseModel):
     # Metadata
     data_hash: str | None = None  # Hash for reproducibility
     notes: str | None = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     def to_flat_dict(self) -> dict[str, Any]:
         """Convert to flat dictionary for Parquet storage."""

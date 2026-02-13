@@ -7,7 +7,6 @@ These models are used for:
 - Audit trail
 """
 
-from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -25,10 +24,10 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
 
 from analize.models.jobs import JobPriority, JobStatus, JobType
+from analize.utils.time import utcnow_naive
 from analize.models.signals import ExitReason, PolicyMode, TradingMode
 
 Base = declarative_base()
@@ -37,8 +36,8 @@ Base = declarative_base()
 class TimestampMixin:
     """Mixin for created_at and updated_at timestamps."""
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
 
 
 class SignalDB(Base, TimestampMixin):
@@ -314,7 +313,7 @@ class AuditLogDB(Base):
     __tablename__ = "audit_logs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=utcnow_naive, nullable=False, index=True)
 
     # What happened
     action = Column(String(100), nullable=False, index=True)

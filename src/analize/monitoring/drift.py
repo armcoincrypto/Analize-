@@ -15,6 +15,7 @@ import pandas as pd
 
 from analize.config import get_settings
 from analize.stats.metrics import TradingMetrics
+from analize.utils.time import utcnow, utcnow_iso
 
 
 class DriftSeverity(str, Enum):
@@ -185,7 +186,10 @@ class DriftDetector:
         # Filter to period
         df = df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-        mask = (df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)
+        # Convert timezone-aware datetime to naive for comparison with pandas datetime64
+        start_date_naive = start_date.replace(tzinfo=None) if hasattr(start_date, 'tzinfo') and start_date.tzinfo else start_date
+        end_date_naive = end_date.replace(tzinfo=None) if hasattr(end_date, 'tzinfo') and end_date.tzinfo else end_date
+        mask = (df["timestamp"] >= start_date_naive) & (df["timestamp"] <= end_date_naive)
         period_df = df[mask]
 
         if period_df.empty:
@@ -250,7 +254,7 @@ class DriftDetector:
         Returns:
             List of drift alerts
         """
-        reference_date = reference_date or datetime.utcnow()
+        reference_date = reference_date or utcnow()
         alerts = []
 
         # Filter by symbol if provided
@@ -301,7 +305,10 @@ class DriftDetector:
 
         # Check sample size
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-        current_mask = (df["timestamp"] >= current_start) & (df["timestamp"] <= current_end)
+        # Convert timezone-aware datetime to naive for comparison with pandas datetime64
+        current_start_naive = current_start.replace(tzinfo=None) if current_start.tzinfo else current_start
+        current_end_naive = current_end.replace(tzinfo=None) if current_end.tzinfo else current_end
+        current_mask = (df["timestamp"] >= current_start_naive) & (df["timestamp"] <= current_end_naive)
         current_count = current_mask.sum()
 
         if current_count < threshold.min_sample_size:
@@ -366,7 +373,7 @@ class DriftDetector:
             alert_id=alert_id,
             metric=metric,
             severity=severity,
-            created_at=datetime.utcnow(),
+            created_at=utcnow(),
             symbol=symbol,
             baseline_value=baseline_value,
             current_value=current_value,
@@ -444,7 +451,7 @@ class DriftDetector:
             symbols = [None]  # Check all data together
 
         results = {
-            "check_time": datetime.utcnow().isoformat(),
+            "check_time": utcnow_iso(),
             "symbols_checked": len(symbols),
             "alerts": [],
             "alerts_by_severity": {
@@ -475,7 +482,7 @@ class DriftDetector:
 
         Useful for dashboards and quick health checks.
         """
-        reference_date = reference_date or datetime.utcnow()
+        reference_date = reference_date or utcnow()
 
         # Calculate metrics for baseline and current periods
         current_end = reference_date

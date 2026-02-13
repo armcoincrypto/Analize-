@@ -13,6 +13,7 @@ from analize.monitoring.drift import (
     DriftSeverity,
     DriftThreshold,
 )
+from analize.utils.time import utcnow
 from analize.monitoring.alerts import AlertChannel, AlertManager, AlertRule, FiredAlert
 
 
@@ -221,7 +222,7 @@ class TestAlertRule:
         assert rule.should_trigger(15.0)
 
         # Set last triggered to now
-        rule.last_triggered = datetime.utcnow()
+        rule.last_triggered = utcnow()
 
         # Should not trigger due to cooldown
         assert not rule.should_trigger(15.0)
@@ -346,7 +347,7 @@ class TestFiredAlert:
             alert_id="ALERT-12345678",
             rule_id="win_rate_drop",
             rule_name="Win Rate Drop",
-            fired_at=datetime.utcnow(),
+            fired_at=utcnow(),
             severity=DriftSeverity.WARNING,
             message="Win rate dropped below threshold",
             metric_value=35.0,

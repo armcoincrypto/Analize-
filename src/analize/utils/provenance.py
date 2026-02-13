@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 import pandas as pd
 
 from analize.config import get_settings
+from analize.utils.time import utcnow
 
 
 @dataclass
@@ -43,7 +44,7 @@ class DataLineage:
     """
 
     lineage_id: UUID = field(default_factory=uuid4)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utcnow)
 
     # Data identification
     data_hash: str = ""

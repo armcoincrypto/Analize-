@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from analize import __version__
 from analize.config import get_settings
 from analize.models.jobs import Job, JobCreate, JobStatus, JobType
+from analize.utils.time import utcnow
 from analize.models.reports import DailyReport, ParameterSuggestion
 from analize.storage.parquet import ParquetStorage
 
@@ -193,7 +194,7 @@ async def _run_ingestion(job_id: UUID, request: IngestRequest) -> None:
         return
 
     job.status = JobStatus.RUNNING
-    job.started_at = datetime.utcnow()
+    job.started_at = utcnow()
 
     try:
         # Perform ingestion based on source type
@@ -217,7 +218,7 @@ async def _run_ingestion(job_id: UUID, request: IngestRequest) -> None:
         job.status = JobStatus.FAILED
         job.result = {"success": False, "error": str(e)}
     finally:
-        job.completed_at = datetime.utcnow()
+        job.completed_at = utcnow()
 
 
 # ============================================================================
@@ -375,7 +376,7 @@ async def _run_optimization(job_id: UUID, request: OptimizeRequest) -> None:
         return
 
     job.status = JobStatus.RUNNING
-    job.started_at = datetime.utcnow()
+    job.started_at = utcnow()
 
     try:
         # Load signals
@@ -434,7 +435,7 @@ async def _run_optimization(job_id: UUID, request: OptimizeRequest) -> None:
         job.status = JobStatus.FAILED
         job.result = {"success": False, "error": str(e)}
     finally:
-        job.completed_at = datetime.utcnow()
+        job.completed_at = utcnow()
 
 
 # ============================================================================
@@ -503,7 +504,7 @@ async def get_suggestions(
     # For now, return empty list
     return SuggestionsResponse(
         suggestions=[],
-        generated_at=datetime.utcnow(),
+        generated_at=utcnow(),
     )
 
 

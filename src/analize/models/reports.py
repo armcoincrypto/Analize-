@@ -15,6 +15,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from analize.utils.time import utcnow
+
 
 class OptimizationObjective(str, Enum):
     """Optimization objective function."""
@@ -245,7 +247,7 @@ class DailyReport(BaseModel):
 
     report_id: UUID = Field(default_factory=uuid4)
     report_date: date
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=utcnow)
 
     # Data versioning
     data_hash: str | None = None
@@ -287,7 +289,7 @@ class WeeklyReport(BaseModel):
     report_id: UUID = Field(default_factory=uuid4)
     week_start: date
     week_end: date
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=utcnow)
 
     # Data versioning
     data_hash: str | None = None
@@ -353,7 +355,7 @@ class Alert(BaseModel):
 
     alert_id: UUID = Field(default_factory=uuid4)
     config_id: str
-    triggered_at: datetime = Field(default_factory=datetime.utcnow)
+    triggered_at: datetime = Field(default_factory=utcnow)
 
     severity: str  # "INFO", "WARNING", "CRITICAL"
     title: str

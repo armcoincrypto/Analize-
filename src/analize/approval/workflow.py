@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from analize.config import get_settings
 from analize.models.reports import ParameterSuggestion
+from analize.utils.time import utcnow, utcnow_iso
 
 
 class ApprovalStatus(str, Enum):
@@ -44,7 +45,7 @@ class ApprovalRequest:
     """
 
     request_id: UUID = field(default_factory=uuid4)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utcnow)
 
     # Suggestion details
     suggestion_id: UUID | None = None
@@ -83,7 +84,7 @@ class ApprovalRequest:
     def add_audit_entry(self, action: str, actor: str, details: dict[str, Any] | None = None) -> None:
         """Add an entry to the audit log."""
         self.audit_log.append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utcnow_iso(),
             "action": action,
             "actor": actor,
             "details": details or {},
@@ -218,7 +219,7 @@ class ApprovalWorkflow:
             },
             backtest_results=backtest_results or {},
             requested_by=requested_by,
-            expires_at=datetime.utcnow() + timedelta(hours=expiration_hours),
+            expires_at=utcnow() + timedelta(hours=expiration_hours),
         )
 
         request.add_audit_entry(
@@ -235,7 +236,7 @@ class ApprovalWorkflow:
     def get_pending_requests(self, symbol: str | None = None) -> list[ApprovalRequest]:
         """Get all pending approval requests."""
         # Check for expired requests
-        now = datetime.utcnow()
+        now = utcnow()
         for req in list(self._requests.values()):
             if req.expires_at and req.expires_at < now:
                 req.status = ApprovalStatus.EXPIRED
@@ -288,7 +289,7 @@ class ApprovalWorkflow:
         request.status = ApprovalStatus.APPROVED
         request.decision = ApprovalDecision.APPROVE
         request.approved_by = approved_by
-        request.approved_at = datetime.utcnow()
+        request.approved_at = utcnow()
         request.review_notes = notes
 
         request.add_audit_entry(
@@ -325,7 +326,7 @@ class ApprovalWorkflow:
         request.status = ApprovalStatus.REJECTED
         request.decision = ApprovalDecision.REJECT
         request.approved_by = rejected_by
-        request.approved_at = datetime.utcnow()
+        request.approved_at = utcnow()
         request.review_notes = reason
 
         request.add_audit_entry(
