@@ -41,9 +41,9 @@ if [[ ! -f "${REPO_DIR}/run_hft.py" ]]; then
     exit 1
 fi
 
-# Verify requirements.txt exists
-if [[ ! -f "${REPO_DIR}/requirements.txt" ]]; then
-    echo "ERROR: requirements.txt not found in $REPO_DIR"
+# Check for dependency file (requirements.txt or pyproject.toml)
+if [[ ! -f "${REPO_DIR}/requirements.txt" ]] && [[ ! -f "${REPO_DIR}/pyproject.toml" ]]; then
+    echo "ERROR: Neither requirements.txt nor pyproject.toml found in $REPO_DIR"
     exit 1
 fi
 
@@ -85,9 +85,14 @@ echo "========================================"
 echo "Upgrading pip..."
 "$PYTHON_PATH" -m pip install --upgrade pip
 
-# Install requirements
-echo "Installing dependencies from requirements.txt..."
-"$PYTHON_PATH" -m pip install -r "${REPO_DIR}/requirements.txt"
+# Install requirements (prefer requirements.txt, fall back to pyproject.toml)
+if [[ -f "${REPO_DIR}/requirements.txt" ]]; then
+    echo "Installing dependencies from requirements.txt..."
+    "$PYTHON_PATH" -m pip install -r "${REPO_DIR}/requirements.txt"
+else
+    echo "No requirements.txt found, installing from pyproject.toml..."
+    "$PYTHON_PATH" -m pip install -e "${REPO_DIR}"
+fi
 
 if [[ $? -ne 0 ]]; then
     echo "ERROR: Failed to install dependencies"
