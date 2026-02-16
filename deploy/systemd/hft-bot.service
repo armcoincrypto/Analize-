@@ -1,0 +1,39 @@
+[Unit]
+Description=HFT Trading Bot - Microstructure Analysis Engine
+After=network.target
+Wants=network-online.target
+# Prevent restart loops: max 5 restarts in 300 seconds (5 minutes)
+# If exceeded, service enters failed state and won't restart automatically
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Analize-
+ExecStart=__PYTHON_PATH__ /root/Analize-/run_hft.py
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+
+# Environment variables
+Environment=PYTHONUNBUFFERED=1
+Environment=PAPER_MAX_TRADES_PER_HOUR=20
+Environment=HFT_PROBE_MODE=0
+Environment=RELAXED_MODE=0
+
+# Graceful shutdown
+KillSignal=SIGINT
+TimeoutStopSec=45
+
+# Security
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Resource limits (optional, uncomment to enable)
+# MemoryMax=2G
+# CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
