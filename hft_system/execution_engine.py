@@ -32,7 +32,10 @@ from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from .config import SYSTEM_CONFIG, TradingMode, get_asset_config
+from .config import (
+    SYSTEM_CONFIG, TradingMode, get_asset_config, COST_MODEL,
+    BASE_MIN_PROFIT_PCT, COST_MULTIPLIER, COST_BUFFER_PCT,
+)
 from .signal_engine import Signal, SignalType
 from .risk_controller import RiskController, Position, RiskDecision
 from .websocket_manager import WebSocketManager
@@ -143,7 +146,28 @@ class ExecutionEngine:
         self.delta_negative_start: Dict[str, float] = {}  # When delta first turned negative
         self.delta_negative_duration: float = 3.0  # Require 3 seconds of negative delta
 
+        # Adaptive minimum take-profit
+        self.min_profit_pct = self._compute_min_profit_pct()
+        logger.info(f"Adaptive min profit: {self.min_profit_pct:.4f}% "
+                    f"(base={BASE_MIN_PROFIT_PCT}, K={COST_MULTIPLIER}, "
+                    f"buffer={COST_BUFFER_PCT})")
         logger.info(f"ExecutionEngine initialized in {self.mode.value} mode")
+
+    @staticmethod
+    def _compute_min_profit_pct() -> float:
+        """Compute adaptive minimum take-profit threshold.
+
+        min_profit_pct = max(BASE_MIN_PROFIT_PCT, K * est_cost_pct + buffer)
+        """
+        if COST_MODEL.enabled:
+            est_cost_pct = (
+                COST_MODEL.entry_fee_pct + COST_MODEL.exit_fee_pct
+                + 2 * COST_MODEL.spread_cost_pct + COST_MODEL.base_slippage_pct
+            )
+        else:
+            est_cost_pct = 0.0
+        cost_based = COST_MULTIPLIER * est_cost_pct + COST_BUFFER_PCT
+        return max(BASE_MIN_PROFIT_PCT, cost_based)
 
     async def execute_entry(self, signal: Signal, risk_decision: RiskDecision) -> TradeResult:
         """
@@ -407,9 +431,10 @@ class ExecutionEngine:
         orderbook = self.ws.get_orderbook(position.symbol)
         trade_flow = self.ws.get_trade_flow(position.symbol)
 
-        # 3. MICRO PROFIT: Exit with small profit (+0.05% to +0.12%) if OB is weakening
-        # This captures edge before it disappears
-        if 0.05 <= pnl_pct < config.take_profit_pct:
+        # 3. MICRO PROFIT: Exit with small profit above adaptive min threshold
+        # min_profit_pct = max(BASE_MIN_PROFIT_PCT, K * est_cost + buffer)
+        # This ensures we never take a micro-profit below breakeven after costs.
+        if self.min_profit_pct <= pnl_pct < config.take_profit_pct:
             if orderbook:
                 current_imbalance = orderbook.imbalance_ratio
                 entry_imbalance = self.entry_imbalance.get(position.symbol, 0.5)

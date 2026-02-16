@@ -14,9 +14,33 @@ Strategy: Orderbook microstructure, NOT scalping
 - Event-based exit, not time-based
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Dict
 from enum import Enum
+
+
+# ---------------------------------------------------------------------------
+# SMOKE_TEST flag: when True, enables test-trade creation (maker_smoke_test,
+# force_paper_trade, manual_close_orphan).  Default OFF in production.
+# Set via environment: SMOKE_TEST=1 to enable.
+# ---------------------------------------------------------------------------
+SMOKE_TEST: bool = os.environ.get("SMOKE_TEST", "0") == "1"
+
+# Exit reasons reserved for test / diagnostic trades
+SMOKE_TEST_EXIT_REASONS: frozenset = frozenset({
+    "maker_smoke_test",
+    "force_paper_trade",
+    "manual_close_orphan",
+})
+
+
+# ---------------------------------------------------------------------------
+# Adaptive minimum take-profit configuration (Deliverable 4)
+# ---------------------------------------------------------------------------
+BASE_MIN_PROFIT_PCT: float = float(os.environ.get("BASE_MIN_PROFIT_PCT", "0.08"))
+COST_MULTIPLIER: float = float(os.environ.get("COST_MULTIPLIER", "1.0"))
+COST_BUFFER_PCT: float = float(os.environ.get("COST_BUFFER_PCT", "0.03"))
 
 
 class TradingMode(Enum):

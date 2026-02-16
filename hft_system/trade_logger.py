@@ -19,7 +19,7 @@ from typing import Dict, Optional, List
 from datetime import datetime, date
 from pathlib import Path
 
-from .config import SYSTEM_CONFIG, COST_MODEL
+from .config import SYSTEM_CONFIG, COST_MODEL, SMOKE_TEST, SMOKE_TEST_EXIT_REASONS
 from .signal_engine import Signal, ConditionResult
 from .execution_engine import TradeResult, ExitResult
 from .risk_controller import RiskDecision
@@ -117,6 +117,12 @@ class TradeLogger:
             cursor.execute("ALTER TABLE trades ADD COLUMN execution_mode TEXT DEFAULT 'taker'")
         except:
             pass  # Columns already exist
+
+        # Smoke-test column migration
+        try:
+            cursor.execute("ALTER TABLE trades ADD COLUMN is_smoke_test INTEGER DEFAULT 0")
+        except:
+            pass  # Column already exists
 
         # Signals table
         cursor.execute("""
@@ -759,6 +765,47 @@ class TradeLogger:
 
         except Exception as e:
             pass  # Silently ignore database lock errors
+
+    def insert_smoke_test_trade(
+        self,
+        symbol: str,
+        exit_reason: str,
+        pnl: float = 0.0,
+        pnl_pct: float = 0.0,
+    ) -> bool:
+        """Insert a diagnostic/smoke-test trade.
+
+        Only works when SMOKE_TEST=1 is set in the environment.
+        Returns True if the trade was inserted, False if blocked.
+        """
+        if not SMOKE_TEST:
+            logger.warning(
+                "insert_smoke_test_trade called but SMOKE_TEST is disabled – ignoring"
+            )
+            return False
+        if exit_reason not in SMOKE_TEST_EXIT_REASONS:
+            logger.warning(f"Unknown smoke-test exit reason: {exit_reason}")
+            return False
+
+        try:
+            import time as _time
+            ts = int(_time.time() * 1000)
+            trade_id = f"smoke_{symbol}_{ts}"
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO trades (
+                    trade_id, symbol, side, entry_price, exit_price,
+                    quantity, entry_time, exit_time,
+                    pnl, pnl_pct, hold_time_sec, exit_reason,
+                    status, is_smoke_test
+                ) VALUES (?, ?, 'LONG', 1.0, 1.0, 0.0, ?, ?, ?, ?, 0, ?, 'closed', 1)
+            """, (trade_id, symbol, ts, ts, pnl, pnl_pct, exit_reason))
+            self.conn.commit()
+            logger.info(f"Smoke-test trade inserted: {trade_id} reason={exit_reason}")
+            return True
+        except Exception as e:
+            logger.error(f"Error inserting smoke-test trade: {e}")
+            return False
 
     def log_market_snapshot(self, symbol: str, data: Dict):
         """Log periodic market snapshot."""

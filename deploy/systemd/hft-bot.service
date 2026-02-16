@@ -22,6 +22,12 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PAPER_MAX_TRADES_PER_HOUR=20
 Environment=HFT_PROBE_MODE=0
 Environment=RELAXED_MODE=0
+# Smoke-test trades disabled by default (set 1 only for diagnostics)
+Environment=SMOKE_TEST=0
+# Adaptive minimum take-profit thresholds
+Environment=BASE_MIN_PROFIT_PCT=0.08
+Environment=COST_MULTIPLIER=1.0
+Environment=COST_BUFFER_PCT=0.03
 
 # Graceful shutdown
 KillSignal=SIGINT

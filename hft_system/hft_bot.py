@@ -341,7 +341,8 @@ class HFTBot:
             return
 
         if self.filter_by_regime and current_regime in self.avoid_regimes:
-            logger.info(f"Signal SKIPPED: {signal.symbol} - regime={current_regime} (avoided)")
+            logger.info(f"REGIME_GATE: trade_blocked regime={current_regime} "
+                       f"avoid_regimes={self.avoid_regimes} symbol={signal.symbol}")
             # Log as blocked signal with regime reason
             market_conditions = {"spread_pct": 0, "spread_change_1s": 0,
                                 "delta_variance": 0, "ob_volume_instability": 0, "liquidity_depth": 0}
@@ -698,10 +699,14 @@ class HFTBot:
                 # Log primary cause in trade entry message
                 logger.info(f"  Primary cause: {primary_cause}")
 
-                # TASK 10: Log regime at entry
-                entry_regime = self.current_regime.get(signal.symbol, "unknown")
+                # TASK 10: Log regime at entry – use the SAME regime that
+                # passed gating (captured at top of _on_signal) to avoid
+                # mismatch between gating decision and stored label.
+                entry_regime = current_regime  # pinned at gating time
                 self.trade_logger.update_trade_regime(signal.symbol, entry_regime, is_entry=True)
-                logger.info(f"  Market regime: {entry_regime}")
+                logger.info(f"  Market regime: {entry_regime} (gated)")
+                logger.info(f"  REGIME_GATE: trade_allowed regime={entry_regime} "
+                           f"avoid_regimes={self.avoid_regimes}")
 
                 # TASK 12: Log position sizing decision
                 if self.enable_adaptive_sizing and confidence:
@@ -1034,29 +1039,63 @@ class HFTBot:
                                f"win rate {perf['win_rate']:.1f}%")
         logger.info("=" * 60)
 
-    async def start(self):
-        """Start the HFT bot."""
+    async def start(self, once: bool = False):
+        """Start the HFT bot.
+
+        Args:
+            once: If True, run one cycle then stop (for testing).
+                  If False (default), keep running as a daemon and
+                  automatically reconnect on transient errors.
+        """
         self.running = True
         self.start_time = datetime.now()
 
         logger.info("=" * 60)
-        logger.info("HFT BOT STARTING")
+        logger.info(f"HFT BOT STARTING (mode={'once' if once else 'daemon'})")
         logger.info("=" * 60)
 
-        # Start all tasks concurrently
+        if once:
+            await self._run_tasks()
+            return
+
+        # Daemon mode: restart internal tasks on transient failures
+        backoff = 5
+        max_backoff = 120
+        while self.running:
+            try:
+                await self._run_tasks()
+                # _run_tasks only returns on shutdown signal
+                break
+            except asyncio.CancelledError:
+                logger.info("Bot tasks cancelled – shutting down")
+                break
+            except Exception as e:
+                logger.error(f"FATAL BOT ERROR: {e}", exc_info=True)
+                logger.info(f"Restarting internal tasks in {backoff}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    async def _run_tasks(self):
+        """Start all concurrent tasks and wait."""
         tasks = [
             asyncio.create_task(self.ws_manager.connect()),
             asyncio.create_task(self.execution_engine.start_monitoring()),
             asyncio.create_task(self._signal_scan_loop()),
-            asyncio.create_task(self._status_loop())
+            asyncio.create_task(self._status_loop()),
         ]
 
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Bot tasks cancelled")
+            raise
         except Exception as e:
-            logger.error(f"Bot error: {e}")
+            logger.error(f"Task error: {e}", exc_info=True)
+            # Cancel surviving tasks
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
         finally:
             await self.stop()
 
@@ -1232,6 +1271,9 @@ def main():
     parser = argparse.ArgumentParser(description="HFT Trading Bot")
     parser.add_argument("--live", action="store_true", help="Run in live mode (default: paper)")
     parser.add_argument("--capital", type=float, default=10000, help="Initial capital")
+    parser.add_argument("--once", action="store_true",
+                        help="Run one cycle then exit (for testing). "
+                             "Default: run as daemon and auto-reconnect.")
     args = parser.parse_args()
 
     mode = TradingMode.LIVE if args.live else TradingMode.PAPER
@@ -1244,6 +1286,7 @@ def main():
 
     def shutdown_handler():
         logger.info("Shutdown signal received")
+        bot.running = False
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
@@ -1251,9 +1294,12 @@ def main():
         loop.add_signal_handler(sig, shutdown_handler)
 
     try:
-        loop.run_until_complete(bot.start())
+        loop.run_until_complete(bot.start(once=args.once))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
+        sys.exit(1)
     finally:
         loop.close()
 
